@@ -1,11 +1,21 @@
 Global / onChangedBuildSource := ReloadOnSourceChanges
 
-ThisBuild / organization := "io.github.dtrosien"
-ThisBuild / scalaVersion := "3.6.2"
-ThisBuild / licenses     := List("Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0"))
-
-
-
+inThisBuild(
+  List(
+    scalaVersion := "3.6.2",
+    organization := "io.github.dtrosien",
+    homepage     := Some(url("https://github.com/dtrosien/flink-rowdata4s")),
+    licenses     := List("Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0")),
+    developers := List(
+      Developer(
+        "dtrosien",
+        "Dominik Trosien",
+        "dominiktrosien@yahoo.de",
+        url("https://github.com/dtrosien")
+      )
+    )
+  )
+)
 
 scalacOptions += "-Xmax-inlines:64"
 
