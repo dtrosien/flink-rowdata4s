@@ -1,31 +1,27 @@
 package com.dtrosien.rowdata4s
 
-import com.sksamuel.avro4s.{AvroName, AvroSchema}
-import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter
+import com.dtrosien.rowdata4s.annotations.TableName
+import com.dtrosien.rowdata4s.datatype.FlinkDataType
 import org.apache.flink.table.api.DataTypes
-import org.apache.flink.table.api.DataTypes.{BIGINT, INT, MAP, STRING}
+import org.apache.flink.table.api.DataTypes.{BIGINT, INT}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.DataType
 import org.apache.flink.types.RowKind
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
-import java.time.Instant.now
+import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
-import java.time.*
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
-
 
 class DecoderTest extends UnitSpec:
 
   "Decoder" should "convert Primitives" in {
     case class Primitives(int: Int, long: Long, double: Double, float: Float, boolean: Boolean)
 
-    val schema = AvroSchema[Primitives]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Primitives].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 5)
@@ -52,9 +48,7 @@ class DecoderTest extends UnitSpec:
   it should "convert Optionals" in {
     case class Optionals(maybeInt: Option[Int], maybeString: Option[String])
 
-    val schema = AvroSchema[Optionals]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Optionals].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 2)
@@ -76,9 +70,7 @@ class DecoderTest extends UnitSpec:
     case class Test(id: Int, num: Long)
     case class TestNested(id: Int, num: Long, inner: Test)
 
-    val schema = AvroSchema[TestNested]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[TestNested].getLogicalType
 
     val testRow: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 2)
@@ -106,9 +98,7 @@ class DecoderTest extends UnitSpec:
   it should "convert Strings" in {
     case class Strings(uuid: UUID, str: String, charSequence: CharSequence)
 
-    val schema = AvroSchema[Strings]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Strings].getLogicalType
 
     val uuid = UUID.randomUUID()
 
@@ -139,9 +129,7 @@ class DecoderTest extends UnitSpec:
         vec: Vector[String]
     )
 
-    val schema = AvroSchema[Collections]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Collections].getLogicalType
 
     val innerRow: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 1)
@@ -182,9 +170,7 @@ class DecoderTest extends UnitSpec:
   it should "convert big decimal" in {
     case class Decimal(dec: BigDecimal)
 
-    val schema = AvroSchema[Decimal]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Decimal].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 1)
@@ -203,9 +189,7 @@ class DecoderTest extends UnitSpec:
   it should "convert bytes" in {
     case class Bytes(bytesArray: Array[Byte], bytebuffer: ByteBuffer)
 
-    val schema = AvroSchema[Bytes]
-
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Bytes].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 2)
@@ -225,8 +209,7 @@ class DecoderTest extends UnitSpec:
 
   it should "convert tuples" in {
     case class Tup(tuple: (String, String))
-    val schema      = AvroSchema[Tup]
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[Tup].getLogicalType
 
     val rowTuple = {
       val row = new GenericRowData(RowKind.INSERT, 2)
@@ -256,14 +239,13 @@ class DecoderTest extends UnitSpec:
         offsetDateTime: OffsetDateTime,
         localTime: LocalTime
     )
-    val schema = AvroSchema[TimeAndDates]
 
     val testInstant = Instant.now
     val testDate    = LocalDate.now
     val testOffsetDateTime =
       OffsetDateTime.ofInstant(testInstant.truncatedTo(ChronoUnit.MILLIS), ZoneOffset.UTC) // truncate to millis
 
-    val logicalType = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType = FlinkDataType[TimeAndDates].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 7)
@@ -321,14 +303,14 @@ class DecoderTest extends UnitSpec:
   }
 
   it should "use annotations" in {
-    case class Test(@AvroName("ID_RENAMED") id: Int)
-    val schema = AvroSchema[Test]
+    case class Test(@TableName("ID_RENAMED") id: Int)
+
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 1)
       row.setField(0, Int.box(42))
       row
     }
-    val logicalType                    = AvroSchemaConverter.convertToDataType(schema.toString).getLogicalType
+    val logicalType                    = FlinkDataType[Test].getLogicalType
     val fromRowData: FromRowData[Test] = FromRowData.apply[Test](logicalType)
     val test                           = fromRowData.from(rowData)
 
