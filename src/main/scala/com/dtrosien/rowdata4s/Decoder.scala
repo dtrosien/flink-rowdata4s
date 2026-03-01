@@ -1,16 +1,16 @@
 package com.dtrosien.rowdata4s
 
-import com.sksamuel.avro4s.typeutils.Annotations
+import com.dtrosien.rowdata4s.annotations.Annotations
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
-import org.apache.flink.table.data.RowData.FieldGetter
 import org.apache.flink.table.data.*
-import org.apache.flink.table.types.logical.LogicalTypeRoot.*
+import org.apache.flink.table.data.RowData.FieldGetter
 import org.apache.flink.table.types.logical.*
+import org.apache.flink.table.types.logical.LogicalTypeRoot.*
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
-import java.time.format.DateTimeFormatter
 import java.time.*
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
