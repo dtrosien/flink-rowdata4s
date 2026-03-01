@@ -1,7 +1,11 @@
 Global / onChangedBuildSource := ReloadOnSourceChanges
 
-ThisBuild / organization := "com.dtrosien.rowdata4s"
+ThisBuild / organization := "io.github.dtrosien"
 ThisBuild / scalaVersion := "3.6.2"
+ThisBuild / licenses     := List("Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0"))
+
+
+
 
 scalacOptions += "-Xmax-inlines:64"
 
