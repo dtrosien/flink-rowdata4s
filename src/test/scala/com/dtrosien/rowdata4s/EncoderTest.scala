@@ -216,3 +216,63 @@ class EncoderTest extends UnitSpec:
       .toInstant // use of instant to have stable tests
 
   }
+
+  it should "convert enums" in {
+    enum Enum {
+      case ABC, CBA
+    }
+    val en                         = Enum.ABC
+    val logicalType                = FlinkDataType[Enum].getLogicalType
+    val toRowData: ToRowData[Enum] = ToRowData.apply[Enum](logicalType)
+
+    val rowData = toRowData.to(en)
+
+    rowData.getString(0).toString shouldBe "ABC"
+  }
+
+  it should "convert sealed traits with case objects" in {
+    sealed trait Enum
+    case object ABC extends Enum
+    case object CBA extends Enum
+    val en                         = ABC
+    val logicalType                = FlinkDataType[Enum].getLogicalType
+    val toRowData: ToRowData[Enum] = ToRowData.apply[Enum](logicalType)
+
+    val rowData = toRowData.to(en)
+
+    rowData.getString(0).toString shouldBe "ABC"
+  }
+
+  it should "convert sealed traits with single instance directly" in {
+    sealed trait TestSealedTrait
+    case class Test1(a: String, b: Int) extends TestSealedTrait
+
+    val logicalType                           = FlinkDataType[TestSealedTrait].getLogicalType
+    val toRowData: ToRowData[TestSealedTrait] = ToRowData.apply[TestSealedTrait](logicalType)
+
+    val st = Test1(a = "ABC", b = 123)
+
+    val rowData = toRowData.to(st)
+
+    rowData.getString(0).toString shouldBe "ABC"
+    rowData.getInt(1) shouldBe 123
+  }
+
+  it should "convert sealed traits" in {
+    sealed trait TestSealedTrait
+    case class Test1(a: String) extends TestSealedTrait
+    case class Test2(b: Inner)  extends TestSealedTrait
+    case class Test3(c: Double) extends TestSealedTrait
+    case class Inner(i: Int)
+    val logicalType                           = FlinkDataType[TestSealedTrait].getLogicalType
+    val toRowData: ToRowData[TestSealedTrait] = ToRowData.apply[TestSealedTrait](logicalType)
+
+    val st = Test2(b = Inner(123))
+
+    val rowData = toRowData.to(st)
+
+//    println(rowData)
+//    println(logicalType)
+    rowData.getRow(1, 3).getRow(0, 1).getInt(0) shouldBe 123
+
+  }

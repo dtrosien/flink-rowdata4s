@@ -1,6 +1,8 @@
 package com.dtrosien.rowdata4s
 
-import com.dtrosien.rowdata4s.annotations.Annotations
+import com.dtrosien.rowdata4s.annotations.{Annotations, Names}
+import com.dtrosien.rowdata4s.datatype.{DatatypeShape, SealedTraitShape}
+import magnolia1.SealedTrait.Subtype
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.logical.*
@@ -16,18 +18,18 @@ import scala.reflect.ClassTag
 
 /** Converts a case class T to a Flink [[RowData]]
   */
-trait ToRowData[T <: Product] extends Serializable {
+trait ToRowData[T] extends Serializable {
   def to(t: T): RowData
 }
 
 object ToRowData {
-  def apply[T <: Product](logicalType: LogicalType)(using encoder: Encoder[T]): ToRowData[T] = new ToRowData[T] {
+  def apply[T](logicalType: LogicalType)(using encoder: Encoder[T]): ToRowData[T] = new ToRowData[T] {
     def to(t: T): RowData = encoder.encode(logicalType).apply(t) match {
       case rowData: RowData => rowData
       case output =>
         val clazz = output.getClass
         throw new UnsupportedOperationException(
-          s"Cannot marshall an instance of $t to RowData (had class $clazz, output was $output)"
+          s"Cannot marshall an instance of $t to RowData (had $clazz, output was $output)"
         )
     }
   }
@@ -78,7 +80,55 @@ trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
   override def join[T](ctx: CaseClass[Encoder, T]): Encoder[T] = new RowEncoder(ctx)
 
   override def split[T](ctx: SealedTrait[Encoder, T]): Encoder[T] =
-    throw UnsupportedOperationException(s"Sealed traits not supported: ${ctx.typeInfo.short}")
+    DatatypeShape.of[T](ctx) match {
+      case SealedTraitShape.TypeUnion =>
+        ctx.subtypes match {
+          case IArray(single) => single.typeclass.asInstanceOf[Encoder[T]]
+          case multiple       => TypeUnions.encoder(ctx)
+        }
+      case SealedTraitShape.Enum => Enums.encoder(ctx)
+    }
+
+// ==============================================
+// TypeUnion   ==================================
+// ==============================================
+
+object TypeUnions {
+  def encoder[T](ctx: SealedTrait[Encoder, T]): Encoder[T] = (logicalType: LogicalType) => {
+    require(!logicalType.getChildren.isEmpty)
+    val encoderBySubtype = ctx.subtypes.zipWithIndex
+      .map((st, i) => {
+        val annos: Annotations       = new Annotations(st.annotations, st.inheritedAnnotations)
+        val names                    = Names(st.typeInfo, annos)
+        val subDataType: LogicalType = logicalType.getChildren.get(i)
+        val encodeT: T => Any        = st.typeclass.asInstanceOf[Encoder[T]].encode(subDataType)
+        (st, (i, encodeT))
+      })
+      .toMap
+
+    { value =>
+      val rowSize = logicalType.getChildren.size()
+      val fields  = new Array[AnyRef](rowSize)
+      ctx.choose(value) { st =>
+        val (index, encodeT) = encoderBySubtype(st.subtype)
+        fields(index) = encodeT.apply(st.cast(value)).asInstanceOf[AnyRef]
+        GenericRowData.of(fields*)
+      }
+    }
+  }
+}
+
+// ==============================================
+// Enums   ======================================
+// ==============================================
+
+object Enums {
+  def encoder[T](ctx: SealedTrait[Encoder, T]): Encoder[T] = (logicalType: LogicalType) => {
+    { (value: T) =>
+      ctx.choose(value) { st => GenericRowData.of(StringEncoder.encode(logicalType)(st.typeInfo.short)) }
+    }
+  }
+}
 
 // ==============================================
 // Row and Field   ==============================

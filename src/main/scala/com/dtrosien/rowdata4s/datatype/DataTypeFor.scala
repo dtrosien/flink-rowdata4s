@@ -77,8 +77,12 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
 
   override def split[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] =
     DatatypeShape.of[T](ctx) match {
-      case SealedTraitShape.Enum      => SealedTraits.dataType(ctx)
-      case SealedTraitShape.TypeUnion => ???
+      case SealedTraitShape.Enum => Enums.dataType(ctx)
+      case SealedTraitShape.TypeUnion =>
+        ctx.subtypes match {
+          case IArray(single) => single.typeclass.forType[T]
+          case multiple       => TypeUnions.dataType(ctx)
+        }
     }
 
 enum CaseClassShape:
@@ -98,30 +102,32 @@ object DatatypeShape:
     if ctx.isValueClass then CaseClassShape.ValueType else CaseClassShape.Record
 
 // ==============================================
-// Sealed Trait and Enum (to ROW and Field)   ===
+// Enum   =======================================
 // ==============================================
 
-object SealedTraits {
+object Enums {
   def dataType[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] = {
-
-    val names = Names(ctx.typeInfo, Annotations(ctx.annotations))
-
-    // It currently appears (magnolia1, v 1) that all the enum elements carry the same annotation set
-    // as the enumeration symbol itself, which leads to name clash in the generated schema.
-    // Annotations that are attached to the enum elements are not visible here.
-//    val symbols = ctx.subtypes.sortBy(_.index).map { st =>
-//      Names(
-//        st.typeInfo,
-//        Annotations(
-//          st.annotations.filter {
-//            case tn: TableName => tn.name != names.name
-//            case _ => true
-//          }
-//        )
-//      )
-//    }
     new DataTypeFor[T] {
-      override def dataType: DataType = DataTypes.ROW(DataTypes.STRING()) // todo add symbol datatypes
+      override def dataType: DataType = {
+        val field = DataTypes.FIELD(ctx.typeInfo.short, DataTypes.STRING.notNull)
+        DataTypes.ROW(field).notNull
+      }
+    }
+  }
+}
+
+// ==============================================
+// TypeUnions   =================================
+// ==============================================
+
+object TypeUnions {
+  def dataType[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] = {
+    val fields = ctx.subtypes.map(st =>
+      val subNames = Names(st.typeInfo, Annotations(st.annotations))
+      DataTypes.FIELD(subNames.name, st.typeclass.dataType.nullable)
+    )
+    new DataTypeFor[T] {
+      override def dataType: DataType = DataTypes.ROW(fields*).notNull
     }
   }
 }
