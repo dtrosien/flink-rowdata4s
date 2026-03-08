@@ -221,11 +221,13 @@ class EncoderTest extends UnitSpec:
     enum Enum {
       case ABC, CBA
     }
-    val en                         = Enum.ABC
-    val logicalType                = FlinkDataType[Enum].getLogicalType
-    val toRowData: ToRowData[Enum] = ToRowData.apply[Enum](logicalType)
+    case class Record(en: Enum)
 
-    val rowData = toRowData.to(en)
+    val en                           = Enum.ABC
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rowData = toRowData.to(Record(en))
 
     rowData.getString(0).toString shouldBe "ABC"
   }
@@ -234,11 +236,13 @@ class EncoderTest extends UnitSpec:
     sealed trait Enum
     case object ABC extends Enum
     case object CBA extends Enum
-    val en                         = ABC
-    val logicalType                = FlinkDataType[Enum].getLogicalType
-    val toRowData: ToRowData[Enum] = ToRowData.apply[Enum](logicalType)
+    case class Record(en: Enum)
 
-    val rowData = toRowData.to(en)
+    val rec                          = Record(ABC)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rowData = toRowData.to(rec)
 
     rowData.getString(0).toString shouldBe "ABC"
   }
@@ -246,16 +250,17 @@ class EncoderTest extends UnitSpec:
   it should "convert sealed traits with single instance directly" in {
     sealed trait TestSealedTrait
     case class Test1(a: String, b: Int) extends TestSealedTrait
+    case class Record(st: TestSealedTrait)
 
-    val logicalType                           = FlinkDataType[TestSealedTrait].getLogicalType
-    val toRowData: ToRowData[TestSealedTrait] = ToRowData.apply[TestSealedTrait](logicalType)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
 
-    val st = Test1(a = "ABC", b = 123)
+    val rec = Record(Test1(a = "ABC", b = 123))
 
-    val rowData = toRowData.to(st)
+    val rowData = toRowData.to(rec)
 
-    rowData.getString(0).toString shouldBe "ABC"
-    rowData.getInt(1) shouldBe 123
+    rowData.getRow(0, 1).getString(0).toString shouldBe "ABC"
+    rowData.getRow(0, 1).getInt(1) shouldBe 123
   }
 
   it should "convert sealed traits" in {
@@ -264,15 +269,29 @@ class EncoderTest extends UnitSpec:
     case class Test2(b: Inner)  extends TestSealedTrait
     case class Test3(c: Double) extends TestSealedTrait
     case class Inner(i: Int)
-    val logicalType                           = FlinkDataType[TestSealedTrait].getLogicalType
-    val toRowData: ToRowData[TestSealedTrait] = ToRowData.apply[TestSealedTrait](logicalType)
 
-    val st = Test2(b = Inner(123))
+    case class Record(st: TestSealedTrait)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
 
-    val rowData = toRowData.to(st)
+    val rec     = Record(Test2(b = Inner(123)))
+    val rowData = toRowData.to(rec)
 
 //    println(rowData)
 //    println(logicalType)
-    rowData.getRow(1, 3).getRow(0, 1).getInt(0) shouldBe 123
+    rowData.getRow(0, 1).getRow(1, 3).getRow(0, 1).getInt(0) shouldBe 123
 
+  }
+
+  it should "convert objects" in {
+    case object SomeObject
+    case class Record(obj: SomeObject.type)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rec = Record(SomeObject)
+
+    val rowData = toRowData.to(rec)
+
+    rowData.getString(0).toString shouldBe "SomeObject"
   }

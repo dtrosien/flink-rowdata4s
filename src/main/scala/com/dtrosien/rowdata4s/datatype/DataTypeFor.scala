@@ -2,6 +2,7 @@ package com.dtrosien.rowdata4s.datatype
 
 import com.dtrosien.rowdata4s.*
 import com.dtrosien.rowdata4s.annotations.{Annotations, Names}
+import com.dtrosien.rowdata4s.datatype.CaseClassShape.Object
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.types.DataType
@@ -73,6 +74,7 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
     DatatypeShape.of(ctx) match {
       case CaseClassShape.Record    => Records.dataType(ctx)
       case CaseClassShape.ValueType => ???
+      case Object                   => Objects.dataType(ctx)
     }
 
   override def split[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] =
@@ -86,7 +88,7 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
     }
 
 enum CaseClassShape:
-  case ValueType, Record
+  case ValueType, Record, Object
 
 enum SealedTraitShape:
   case TypeUnion, Enum
@@ -98,8 +100,24 @@ object DatatypeShape:
     if ctx.isEnum || allSubtypesAreObjects then SealedTraitShape.Enum else SealedTraitShape.TypeUnion
   }
 
-  def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape =
-    if ctx.isValueClass then CaseClassShape.ValueType else CaseClassShape.Record
+  def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape = {
+    if ctx.isValueClass then CaseClassShape.ValueType
+    else if ctx.isObject then CaseClassShape.Object
+    else if ctx.parameters.isEmpty then CaseClassShape.Object // required to be able to convert simple enums to strings
+    else CaseClassShape.Record
+  }
+
+// ==============================================
+// Object   =====================================
+// ==============================================
+
+object Objects {
+  def dataType[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] = {
+    new DataTypeFor[T] {
+      override def dataType: DataType = DataTypes.STRING.notNull
+    }
+  }
+}
 
 // ==============================================
 // Enum   =======================================
@@ -108,10 +126,7 @@ object DatatypeShape:
 object Enums {
   def dataType[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] = {
     new DataTypeFor[T] {
-      override def dataType: DataType = {
-        val field = DataTypes.FIELD(ctx.typeInfo.short, DataTypes.STRING.notNull)
-        DataTypes.ROW(field).notNull
-      }
+      override def dataType: DataType = DataTypes.STRING.notNull
     }
   }
 }
