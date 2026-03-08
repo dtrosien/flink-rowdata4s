@@ -216,3 +216,82 @@ class EncoderTest extends UnitSpec:
       .toInstant // use of instant to have stable tests
 
   }
+
+  it should "convert enums" in {
+    enum Enum {
+      case ABC, CBA
+    }
+    case class Record(en: Enum)
+
+    val en                           = Enum.ABC
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rowData = toRowData.to(Record(en))
+
+    rowData.getString(0).toString shouldBe "ABC"
+  }
+
+  it should "convert sealed traits with case objects" in {
+    sealed trait Enum
+    case object ABC extends Enum
+    case object CBA extends Enum
+    case class Record(en: Enum)
+
+    val rec                          = Record(ABC)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rowData = toRowData.to(rec)
+
+    rowData.getString(0).toString shouldBe "ABC"
+  }
+
+  it should "convert sealed traits with single instance directly" in {
+    sealed trait TestSealedTrait
+    case class Test1(a: String, b: Int) extends TestSealedTrait
+    case class Record(st: TestSealedTrait)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rec = Record(Test1(a = "ABC", b = 123))
+
+    val rowData = toRowData.to(rec)
+
+    rowData.getRow(0, 1).getString(0).toString shouldBe "ABC"
+    rowData.getRow(0, 1).getInt(1) shouldBe 123
+  }
+
+  it should "convert sealed traits" in {
+    sealed trait TestSealedTrait
+    case class Test1(a: String) extends TestSealedTrait
+    case class Test2(b: Inner)  extends TestSealedTrait
+    case class Test3(c: Double) extends TestSealedTrait
+    case class Inner(i: Int)
+
+    case class Record(st: TestSealedTrait)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rec     = Record(Test2(b = Inner(123)))
+    val rowData = toRowData.to(rec)
+
+//    println(rowData)
+//    println(logicalType)
+    rowData.getRow(0, 1).getRow(1, 3).getRow(0, 1).getInt(0) shouldBe 123
+
+  }
+
+  it should "convert objects" in {
+    case object SomeObject
+    case class Record(obj: SomeObject.type)
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rec = Record(SomeObject)
+
+    val rowData = toRowData.to(rec)
+
+    rowData.getString(0).toString shouldBe "SomeObject"
+  }

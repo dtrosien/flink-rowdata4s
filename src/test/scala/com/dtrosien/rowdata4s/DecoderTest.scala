@@ -317,3 +317,82 @@ class DecoderTest extends UnitSpec:
     test.id shouldBe 42
 
   }
+
+  it should "convert simple enums" in {
+    enum Enum {
+      case ABC, CBA
+    }
+
+    case class Test(id: Int, en: Enum)
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(42))
+      row.setField(1, StringData.fromString("ABC"))
+      row
+    }
+
+    val logicalType                    = FlinkDataType[Test].getLogicalType
+    val fromRowData: FromRowData[Test] = FromRowData.apply[Test](logicalType)
+
+    val test = fromRowData.from(rowData)
+
+    test.en shouldBe Enum.ABC
+  }
+
+  it should "convert sealed traits with objects" in {
+    sealed trait SealedTrait
+    case object ABC extends SealedTrait
+    case object CBA extends SealedTrait
+
+    case class Test(id: Int, st: SealedTrait)
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(42))
+      row.setField(1, StringData.fromString("ABC"))
+      row
+    }
+
+    val logicalType                    = FlinkDataType[Test].getLogicalType
+    val fromRowData: FromRowData[Test] = FromRowData.apply[Test](logicalType)
+
+    val test = fromRowData.from(rowData)
+
+    test.st shouldBe ABC
+  }
+
+  it should "convert sealed traits with classes" in {
+    sealed trait SealedTrait
+    case class A(a: String)         extends SealedTrait
+    case class B(a: String, b: Int) extends SealedTrait
+
+    case class Test(id: Int, st: SealedTrait)
+
+    val valueRow: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, StringData.fromString("ABC"))
+      row.setField(1, Int.box(123))
+      row
+    }
+
+    val enumRow: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, null)
+      row.setField(1, valueRow)
+      row
+    }
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(42))
+      row.setField(1, enumRow)
+      row
+    }
+
+    val logicalType                    = FlinkDataType[Test].getLogicalType
+    val fromRowData: FromRowData[Test] = FromRowData.apply[Test](logicalType)
+    val test = fromRowData.from(rowData)
+
+    test.st shouldBe B("ABC", 123)
+  }

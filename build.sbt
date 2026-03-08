@@ -29,6 +29,7 @@ lazy val root = (project in file(".")).settings(
     "org.apache.flink"              % "flink-avro"           % flinkVersion % Test,
     "com.sksamuel.avro4s"          %% "avro4s-core"          % "5.0.15"     % Test,
     "org.scalatest"                %% "scalatest"            % "3.2.19"     % Test,
+    "org.scalatestplus"            %% "scalacheck-1-19"      % "3.2.19.0"   % Test,
     "ch.qos.logback"                % "logback-classic"      % "1.5.32"     % Test
   )
 )

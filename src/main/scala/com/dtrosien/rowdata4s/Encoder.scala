@@ -1,6 +1,8 @@
 package com.dtrosien.rowdata4s
 
-import com.dtrosien.rowdata4s.annotations.Annotations
+import com.dtrosien.rowdata4s.annotations.{Annotations, Names}
+import com.dtrosien.rowdata4s.datatype.{CaseClassShape, DatatypeShape, SealedTraitShape}
+import magnolia1.SealedTrait.Subtype
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.logical.*
@@ -13,21 +15,24 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
+import scala.util.NotGiven
 
 /** Converts a case class T to a Flink [[RowData]]
   */
-trait ToRowData[T <: Product] extends Serializable {
+trait ToRowData[T <: Product](using NotGiven[T <:< reflect.Enum]) extends Serializable {
   def to(t: T): RowData
 }
 
 object ToRowData {
-  def apply[T <: Product](logicalType: LogicalType)(using encoder: Encoder[T]): ToRowData[T] = new ToRowData[T] {
+  def apply[T <: Product](
+      logicalType: LogicalType
+  )(using encoder: Encoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): ToRowData[T] = new ToRowData[T] {
     def to(t: T): RowData = encoder.encode(logicalType).apply(t) match {
       case rowData: RowData => rowData
       case output =>
         val clazz = output.getClass
         throw new UnsupportedOperationException(
-          s"Cannot marshall an instance of $t to RowData (had class $clazz, output was $output)"
+          s"Cannot marshall an instance of $t to RowData (had $clazz, output was $output)"
         )
     }
   }
@@ -75,10 +80,70 @@ object Encoder
 // ==============================================
 
 trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
-  override def join[T](ctx: CaseClass[Encoder, T]): Encoder[T] = new RowEncoder(ctx)
+  override def join[T](ctx: CaseClass[Encoder, T]): Encoder[T] = DatatypeShape.of(ctx) match {
+    case CaseClassShape.Record    => RowEncoder(ctx)
+    case CaseClassShape.ValueType => RowEncoder(ctx)
+    case CaseClassShape.Object    => ObjectEncoder(ctx)
+  }
 
   override def split[T](ctx: SealedTrait[Encoder, T]): Encoder[T] =
-    throw UnsupportedOperationException(s"Sealed traits not supported: ${ctx.typeInfo.short}")
+    DatatypeShape.of[T](ctx) match {
+      case SealedTraitShape.TypeUnion =>
+        ctx.subtypes match {
+          case IArray(single) => single.typeclass.asInstanceOf[Encoder[T]]
+          case multiple       => TypeUnionEncoder(ctx)
+        }
+      case SealedTraitShape.Enum => EnumEncoder(ctx)
+    }
+
+// ==============================================
+// TypeUnion   ==================================
+// ==============================================
+
+class TypeUnionEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
+  def encode(logicalType: LogicalType): T => Any = {
+    require(!logicalType.getChildren.isEmpty)
+    val encoderBySubtype = ctx.subtypes.zipWithIndex
+      .map((st, i) => {
+        val annos: Annotations       = new Annotations(st.annotations, st.inheritedAnnotations)
+        val names                    = Names(st.typeInfo, annos)
+        val subDataType: LogicalType = logicalType.getChildren.get(i)
+        val encodeT: T => Any        = st.typeclass.asInstanceOf[Encoder[T]].encode(subDataType)
+        (st, (i, encodeT))
+      })
+      .toMap
+
+    { value =>
+      val rowSize = logicalType.getChildren.size()
+      val fields  = new Array[AnyRef](rowSize)
+      ctx.choose(value) { st =>
+        val (index, encodeT) = encoderBySubtype(st.subtype)
+        fields(index) = encodeT.apply(st.cast(value)).asInstanceOf[AnyRef]
+        GenericRowData.of(fields*)
+      }
+    }
+  }
+}
+
+// ==============================================
+// Enums   ======================================
+// ==============================================
+
+class EnumEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
+  def encode(logicalType: LogicalType): T => Any = { (value: T) =>
+    ctx.choose(value) { st => StringEncoder.encode(logicalType)(st.typeInfo.short) }
+  }
+}
+
+// ==============================================
+// Objects   ======================================
+// ==============================================
+
+class ObjectEncoder[T](ctx: magnolia1.CaseClass[Encoder, T]) extends Encoder[T] {
+  def encode(logicalType: LogicalType): T => Any = { (value: T) =>
+    StringEncoder.encode(logicalType)(ctx.typeInfo.short)
+  }
+}
 
 // ==============================================
 // Row and Field   ==============================

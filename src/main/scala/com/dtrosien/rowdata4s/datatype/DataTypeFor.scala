@@ -2,6 +2,7 @@ package com.dtrosien.rowdata4s.datatype
 
 import com.dtrosien.rowdata4s.*
 import com.dtrosien.rowdata4s.annotations.{Annotations, Names}
+import com.dtrosien.rowdata4s.datatype.CaseClassShape.Object
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.types.DataType
@@ -73,16 +74,21 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
     DatatypeShape.of(ctx) match {
       case CaseClassShape.Record    => Records.dataType(ctx)
       case CaseClassShape.ValueType => ???
+      case Object                   => Objects.dataType(ctx)
     }
 
   override def split[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] =
     DatatypeShape.of[T](ctx) match {
-      case SealedTraitShape.Enum      => SealedTraits.dataType(ctx)
-      case SealedTraitShape.TypeUnion => ???
+      case SealedTraitShape.Enum => Enums.dataType(ctx)
+      case SealedTraitShape.TypeUnion =>
+        ctx.subtypes match {
+          case IArray(single) => single.typeclass.forType[T]
+          case multiple       => TypeUnions.dataType(ctx)
+        }
     }
 
 enum CaseClassShape:
-  case ValueType, Record
+  case ValueType, Record, Object
 
 enum SealedTraitShape:
   case TypeUnion, Enum
@@ -94,34 +100,49 @@ object DatatypeShape:
     if ctx.isEnum || allSubtypesAreObjects then SealedTraitShape.Enum else SealedTraitShape.TypeUnion
   }
 
-  def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape =
-    if ctx.isValueClass then CaseClassShape.ValueType else CaseClassShape.Record
+  def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape = {
+    if ctx.isValueClass then CaseClassShape.ValueType
+    else if ctx.isObject then CaseClassShape.Object
+    else if ctx.parameters.isEmpty then CaseClassShape.Object // required to be able to convert simple enums to strings
+    else CaseClassShape.Record
+  }
 
 // ==============================================
-// Sealed Trait and Enum (to ROW and Field)   ===
+// Object   =====================================
 // ==============================================
 
-object SealedTraits {
-  def dataType[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] = {
-
-    val names = Names(ctx.typeInfo, Annotations(ctx.annotations))
-
-    // It currently appears (magnolia1, v 1) that all the enum elements carry the same annotation set
-    // as the enumeration symbol itself, which leads to name clash in the generated schema.
-    // Annotations that are attached to the enum elements are not visible here.
-//    val symbols = ctx.subtypes.sortBy(_.index).map { st =>
-//      Names(
-//        st.typeInfo,
-//        Annotations(
-//          st.annotations.filter {
-//            case tn: TableName => tn.name != names.name
-//            case _ => true
-//          }
-//        )
-//      )
-//    }
+object Objects {
+  def dataType[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] = {
     new DataTypeFor[T] {
-      override def dataType: DataType = DataTypes.ROW(DataTypes.STRING()) // todo add symbol datatypes
+      override def dataType: DataType = DataTypes.STRING.notNull
+    }
+  }
+}
+
+// ==============================================
+// Enum   =======================================
+// ==============================================
+
+object Enums {
+  def dataType[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] = {
+    new DataTypeFor[T] {
+      override def dataType: DataType = DataTypes.STRING.notNull
+    }
+  }
+}
+
+// ==============================================
+// TypeUnions   =================================
+// ==============================================
+
+object TypeUnions {
+  def dataType[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] = {
+    val fields = ctx.subtypes.map(st =>
+      val subNames = Names(st.typeInfo, Annotations(st.annotations))
+      DataTypes.FIELD(subNames.name, st.typeclass.dataType.nullable)
+    )
+    new DataTypeFor[T] {
+      override def dataType: DataType = DataTypes.ROW(fields*).notNull
     }
   }
 }

@@ -9,7 +9,15 @@ project and modified to work with Flink's `RowData` format instead of Avro.
 
 Credit goes to the original authors of avro4s for the foundation on which this library is built.
 
+Datatype derivation is compatible with Flink’s `AvroSchemaConverter` only for product types (i.e., case classes /
+records).
+Algebraic data types (ADTs) are flattened into a `Row` containing optional fields for each variant. This structural
+encoding is not compatible with `AvroSchemaConverter`, which does not derive a corresponding Avro union schema and
+instead falls back to Kryo serialization for arbitrary objects. Simple enums are treated as Strings inside a Row.
+
 #### TODO
 
-- [ ] Implement Sealed Trait and Enum Encoder/Decoder
-- [ ] Fix Sealed Trait in DataType derivation
+- [x] Implement Sealed Trait and Enum Encoder
+- [x] Implement Sealed Trait and Enum Decoder
+- [x] Fix Sealed Trait in DataType derivation
+- [ ] add examples to readme

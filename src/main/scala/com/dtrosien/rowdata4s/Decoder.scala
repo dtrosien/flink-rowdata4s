@@ -1,6 +1,7 @@
 package com.dtrosien.rowdata4s
 
-import com.dtrosien.rowdata4s.annotations.Annotations
+import com.dtrosien.rowdata4s.annotations.{Annotations, Names}
+import com.dtrosien.rowdata4s.datatype.{CaseClassShape, DatatypeShape, SealedTraitShape}
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.data.RowData.FieldGetter
@@ -14,16 +15,19 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
+import scala.util.NotGiven
 import scala.util.control.NonFatal
 
 /** Converts from a Flink [[RowData]] into instances of T.
   */
-trait FromRowData[T] extends Serializable {
+trait FromRowData[T <: Product] extends Serializable {
   def from(rowData: RowData): T
 }
 
 object FromRowData {
-  def apply[T](logicalType: LogicalType)(using decoder: Decoder[T]): FromRowData[T] = new FromRowData[T] {
+  def apply[T <: Product](
+      logicalType: LogicalType
+  )(using decoder: Decoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): FromRowData[T] = new FromRowData[T] {
     override def from(rowData: RowData): T = decoder.decode(logicalType).apply(rowData)
   }
 }
@@ -61,10 +65,78 @@ object Decoder
 trait MagnoliaDerivedDecoder extends AutoDerivation[Decoder]:
 
   override def join[T](ctx: CaseClass[Decoder, T]): Decoder[T] =
-    RowDecoder(ctx)
+    DatatypeShape.of(ctx) match {
+      case CaseClassShape.Record    => RowDecoder(ctx)
+      case CaseClassShape.ValueType => RowDecoder(ctx)
+      case CaseClassShape.Object    => ObjectDecoder(ctx)
+    }
 
   override def split[T](ctx: SealedTrait[Decoder, T]): Decoder[T] =
-    throw UnsupportedOperationException(s"Sealed traits not supported: ${ctx.typeInfo.short}")
+    DatatypeShape.of[T](ctx) match {
+      case SealedTraitShape.TypeUnion =>
+        ctx.subtypes match {
+          case IArray(single) => single.typeclass.asInstanceOf[Decoder[T]]
+          case multiple       => TypeUnionDecoder(ctx)
+        }
+      case SealedTraitShape.Enum => EnumDecoder(ctx)
+    }
+
+// ==============================================
+// TypeUnions   =================================
+// ==============================================
+
+class TypeUnionDecoder[T](ctx: magnolia1.SealedTrait[Decoder, T]) extends Decoder[T] {
+  override def decode(logicalType: LogicalType): Any => T = {
+    require(logicalType.getTypeRoot == LogicalTypeRoot.ROW)
+    val fields = logicalType.asInstanceOf[RowType].getFields.asScala
+
+    val namedSubtypes: Seq[(String, SealedTrait.Subtype[Decoder, T, ?])] =
+      ctx.subtypes.map(st => Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name -> st)
+
+    { value =>
+      val row = value.asInstanceOf[RowData]
+
+      val (activeField, activeIndex) = fields.zipWithIndex
+        .find { case (_, i) => !row.isNullAt(i) }
+        .getOrElse(throw new RuntimeException("All fields are null in union ROW"))
+
+      val (_, st) = namedSubtypes
+        .find { case (name, _) => name == activeField.getName }
+        .getOrElse(throw new RuntimeException(s"No subtype found for field ${activeField.getName}"))
+
+      val fieldValue = RowData.createFieldGetter(activeField.getType, activeIndex).getFieldOrNull(row)
+      st.typeclass.asInstanceOf[Decoder[T]].decode(activeField.getType)(fieldValue)
+    }
+  }
+}
+
+// ==============================================
+// Enums   ===================================
+// ==============================================
+
+class EnumDecoder[T](ctx: magnolia1.SealedTrait[Decoder, T]) extends Decoder[T] {
+  override def decode(logicalType: LogicalType): Any => T = {
+    require(logicalType.getTypeRoot == LogicalTypeRoot.VARCHAR)
+
+    def decodeString = StringDecoder.decode(logicalType)
+
+    { value =>
+      val strValue = decodeString(value)
+      ctx.subtypes
+        .find(st => Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name == strValue)
+        .map { st => st.typeclass.decode(logicalType)(value) }
+        .get
+    }
+  }
+}
+
+// ==============================================
+// Objects   ===================================
+// ==============================================
+
+class ObjectDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
+  override def decode(logicalType: LogicalType): Any => T = { value => ctx.rawConstruct(Nil) }
+}
 
 // ==============================================
 // Row and Field   ==============================
@@ -102,7 +174,6 @@ class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
 
   private def decodeT(logicalType: LogicalType, decoders: Array[FieldDecoder[T]], value: Any): T = value match {
     case rowData: RowData =>
-      // hot code path. Sacrificing functional programming to the gods of performance.
       val length = decoders.length
       val values = new Array[Any](length)
       var i      = 0
