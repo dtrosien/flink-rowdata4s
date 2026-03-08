@@ -21,7 +21,3 @@ instead falls back to Kryo serialization for arbitrary objects. Simple enums are
 - [x] Implement Sealed Trait and Enum Decoder
 - [x] Fix Sealed Trait in DataType derivation
 - [ ] add examples to readme
-
-#### Known Issues
-
--fails to encode/decode mixed sealed traits with case classes and case objects 

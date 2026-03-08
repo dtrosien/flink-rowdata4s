@@ -10,6 +10,7 @@ case class A(a: String) extends SealedTrait
 case class B(a: String, b: Int, inner: Inner) extends SealedTrait
 
 case class C(anotherSt: AnotherSt, en: Enum) extends SealedTrait
+case object D                                extends SealedTrait
 
 case class Inner(i: Int, en: Enum)
 
@@ -67,7 +68,7 @@ object Generators {
     en        <- genEnum
   } yield C(anotherSt, en)
 
-  val genSealedTrait: Gen[SealedTrait]                = Gen.oneOf(genA, genB, genC)
+  val genSealedTrait: Gen[SealedTrait]                = Gen.oneOf(genA, genB, genC, Gen.const(D))
   implicit val arbSealedTrait: Arbitrary[SealedTrait] = Arbitrary(genSealedTrait)
 
   // Record
