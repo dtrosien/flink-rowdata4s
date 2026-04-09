@@ -503,7 +503,13 @@ trait TemporalDecoders:
   given TimestampDecoder: Decoder[Timestamp]         = InstantDecoder.map[Timestamp](Timestamp.from)
   given DateDecoder: Decoder[Date]                   = LocalDateDecoder.map[Date](Date.valueOf)
   given LocalDateTimeDecoder: Decoder[LocalDateTime] = InstantDecoder.map(LocalDateTime.ofInstant(_, ZoneOffset.UTC))
-  given LocalTimeDecoder: Decoder[LocalTime]         = InstantDecoder.map(LocalTime.ofInstant(_, ZoneOffset.UTC))
+  given LocalTimeDecoder: Decoder[LocalTime] = new Decoder[LocalTime] {
+    override def decode(logicalType: LogicalType): Any => LocalTime = {
+      // Flink stores TIME_WITHOUT_TIME_ZONE as milliseconds-of-day as an int internally
+      case i: Int  => LocalTime.ofNanoOfDay(i.toLong * 1_000_000)
+      case l: Long => LocalTime.ofNanoOfDay(l * 1_000_000)
+    }
+  }
   given LocalDateDecoder: Decoder[LocalDate] = Decoder.IntDecoder.map[LocalDate](i => LocalDate.ofEpochDay(i.toLong))
 
   given OffsetDateTimeDecoder: Decoder[OffsetDateTime] =

@@ -57,7 +57,8 @@ class DatatypesTest extends UnitSpec:
         map: Map[String, Inner],
         arr: Array[Option[Inner]],
         seq: Seq[Int],
-        vec: Vector[String]
+        vec: Vector[String],
+        set: Set[Int]
     )
     val schema             = AvroSchema[Collections]
     val dataTypeFromSchema = AvroSchemaConverter.convertToDataType(schema.toString)
@@ -108,6 +109,16 @@ class DatatypesTest extends UnitSpec:
     val dataType           = FlinkDataType[TimeAndDates]
 
     dataType shouldBe dataTypeFromSchema
+  }
+
+  it should "derive java.util.Date" in {
+    case class WithUtilDate(d: java.util.Date)
+    val dataType = FlinkDataType[WithUtilDate]
+
+    // deviates from Avro: java.util.Date behaves like an Instant and maps to TIMESTAMP_LTZ
+    dataType shouldBe DataTypes.ROW(
+      DataTypes.FIELD("d", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull)
+    ).notNull
   }
 
   it should "use Annotations" in {
@@ -189,4 +200,67 @@ class DatatypesTest extends UnitSpec:
     // deviates from Avro to make objects directly convert to String!!!
     // dataType shouldBe dataTypeFromSchema
     dataType shouldBe DataTypes.STRING.notNull
+  }
+
+  it should "derive byte iterables" in {
+    case class ByteIterables(listBytes: List[Byte], seqBytes: Seq[Byte], vecBytes: Vector[Byte])
+    val dataType = FlinkDataType[ByteIterables]
+
+    // deviates from Avro: List/Seq/Vector[Byte] map to BYTES (like Array[Byte]), not ARRAY<INT>
+    dataType shouldBe DataTypes.ROW(
+      DataTypes.FIELD("listBytes", DataTypes.BYTES.notNull),
+      DataTypes.FIELD("seqBytes", DataTypes.BYTES.notNull),
+      DataTypes.FIELD("vecBytes", DataTypes.BYTES.notNull)
+    ).notNull
+  }
+
+  it should "derive None type" in {
+    val dataType = FlinkDataType[None.type]
+
+    // deviates from Avro: None.type has no natural Avro equivalent
+    dataType shouldBe DataTypes.NULL()
+  }
+
+  it should "derive Tuple3" in {
+    case class Tup3(t: (String, Int, Boolean))
+    val schema             = AvroSchema[Tup3]
+    val dataTypeFromSchema = AvroSchemaConverter.convertToDataType(schema.toString)
+    val dataType           = FlinkDataType[Tup3]
+
+    dataType shouldBe dataTypeFromSchema
+  }
+
+  it should "derive Tuple4" in {
+    case class Tup4(t: (String, Int, Boolean, Long))
+    val schema             = AvroSchema[Tup4]
+    val dataTypeFromSchema = AvroSchemaConverter.convertToDataType(schema.toString)
+    val dataType           = FlinkDataType[Tup4]
+
+    dataType shouldBe dataTypeFromSchema
+  }
+
+  it should "derive Tuple5" in {
+    case class Tup5(t: (String, Int, Boolean, Long, Double))
+    val schema             = AvroSchema[Tup5]
+    val dataTypeFromSchema = AvroSchemaConverter.convertToDataType(schema.toString)
+    val dataType           = FlinkDataType[Tup5]
+
+    dataType shouldBe dataTypeFromSchema
+  }
+
+  it should "derive Tuple6" in {
+    case class Tup6(t: (String, Int, Boolean, Long, Double, Float))
+    val dataType = FlinkDataType[Tup6]
+
+    // deviates from Avro: avro4s has a bug where _6 repeats _5's type, so AvroSchemaConverter cannot be used here
+    dataType shouldBe DataTypes.ROW(
+      DataTypes.FIELD("t", DataTypes.ROW(
+        DataTypes.FIELD("_1", DataTypes.STRING.notNull),
+        DataTypes.FIELD("_2", DataTypes.INT.notNull),
+        DataTypes.FIELD("_3", DataTypes.BOOLEAN.notNull),
+        DataTypes.FIELD("_4", DataTypes.BIGINT.notNull),
+        DataTypes.FIELD("_5", DataTypes.DOUBLE.notNull),
+        DataTypes.FIELD("_6", DataTypes.FLOAT.notNull)
+      ).notNull)
+    ).notNull
   }

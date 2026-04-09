@@ -2,8 +2,10 @@ package com.dtrosien.rowdata4s
 
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
 import org.apache.flink.table.api.DataTypes
-import org.apache.flink.table.api.DataTypes.{INT, MAP, STRING}
+import org.apache.flink.table.api.DataTypes.{INT, MAP, MULTISET, STRING}
+import org.apache.flink.table.data.TimestampData
 import org.apache.flink.table.types.DataType
+import org.apache.flink.table.types.logical.TimestampType
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
@@ -90,7 +92,8 @@ class EncoderTest extends UnitSpec:
         map: Map[String, Inner],
         arr: Array[Option[Inner]],
         seq: Seq[Int],
-        vec: Vector[String]
+        vec: Vector[String],
+        set: Set[String]
     )
 
     val inner = Inner("someName")
@@ -99,7 +102,8 @@ class EncoderTest extends UnitSpec:
       Map("key" -> inner),
       Array(Some(inner), None, Some(inner)),
       Seq(1, 2),
-      Vector("1", "2")
+      Vector("1", "2"),
+      Set("a")
     )
 
     val logicalType                       = FlinkDataType[Collections].getLogicalType
@@ -112,6 +116,7 @@ class EncoderTest extends UnitSpec:
     rowData.getArray(2).getRow(1, 1) shouldBe null
     rowData.getArray(3).getInt(1) shouldBe 2
     rowData.getArray(4).getString(0).toString shouldBe "1"
+    rowData.getArray(5).getString(0).toString shouldBe "a"
   }
 
   it should "convert custom key types in maps" in {
@@ -207,13 +212,17 @@ class EncoderTest extends UnitSpec:
       LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     )
 
-    rowData.getLong(5) shouldBe LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay
+    rowData.getInt(5) shouldBe (LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay / 1_000_000).toInt
 
     OffsetDateTime
       .parse(rowData.getString(6).toString, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
       .toInstant shouldBe OffsetDateTime
       .ofInstant(testInstant, ZoneOffset.UTC)
       .toInstant // use of instant to have stable tests
+
+    // TIMESTAMP_WITHOUT_TIME_ZONE branch (FlinkDataType uses BIGINT for LocalDateTime by default)
+    val ldt = LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
+    Encoder[LocalDateTime].encode(new TimestampType(false, 3))(ldt) shouldBe TimestampData.fromLocalDateTime(ldt)
 
   }
 
@@ -294,4 +303,89 @@ class EncoderTest extends UnitSpec:
     val rowData = toRowData.to(rec)
 
     rowData.getString(0).toString shouldBe "SomeObject"
+  }
+
+  it should "convert Byte and Short primitives" in {
+    val byteEncoder  = Encoder[Byte]
+    val shortEncoder = Encoder[Short]
+
+    byteEncoder.encode(null)(42.toByte) shouldBe java.lang.Byte.valueOf(42.toByte)
+    shortEncoder.encode(null)(100.toShort) shouldBe java.lang.Short.valueOf(100.toShort)
+  }
+
+  it should "convert byte iterables" in {
+    case class ByteIterables(listBytes: List[Byte], seqBytes: Seq[Byte], vecBytes: Vector[Byte])
+
+    val logicalType                         = FlinkDataType[ByteIterables].getLogicalType
+    val toRowData: ToRowData[ByteIterables] = ToRowData.apply[ByteIterables](logicalType)
+
+    val data    = "hello".getBytes.toList
+    val rowData = toRowData.to(ByteIterables(data, data.toSeq, data.toVector))
+
+    rowData.getBinary(0) shouldBe "hello".getBytes
+    rowData.getBinary(1) shouldBe "hello".getBytes
+    rowData.getBinary(2) shouldBe "hello".getBytes
+  }
+
+  it should "convert Map with MULTISET type" in {
+    case class WithMultiset(counts: Map[Int, String])
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("counts", MULTISET(STRING().notNull).notNull)
+    )
+    val logicalType                        = customType.getLogicalType
+    val toRowData: ToRowData[WithMultiset] = ToRowData.apply[WithMultiset](logicalType)
+
+    val rowData = toRowData.to(WithMultiset(Map(1 -> "a")))
+
+    rowData.getMap(0).keyArray().getInt(0) shouldBe 1
+    rowData.getMap(0).valueArray().getString(0).toString shouldBe "a"
+  }
+
+  it should "support Encoder.identity" in {
+    val enc    = Encoder.identity[String]
+    val result = enc.encode(null)("hello")
+    result shouldBe "hello"
+  }
+
+  it should "support Encoder.contramap" in {
+    val intEncoder = Encoder[Int]
+    val longToInt  = intEncoder.contramap[Long](_.toInt)
+    val result     = longToInt.encode(null)(42L)
+    result shouldBe Integer.valueOf(42)
+  }
+
+  it should "throw on unsupported UUID schema type" in {
+    import org.apache.flink.table.types.logical.IntType
+    an[UnsupportedOperationException] should be thrownBy {
+      UUIDEncoder.encode(new IntType())(UUID.randomUUID())
+    }
+  }
+
+  it should "throw on unsupported ByteArrayEncoder schema type" in {
+    import org.apache.flink.table.types.logical.VarCharType
+    an[UnsupportedOperationException] should be thrownBy {
+      ByteArrayEncoder.encode(new VarCharType())("bad".getBytes)
+    }
+  }
+
+  it should "throw on unsupported ByteBufferEncoder schema type" in {
+    import org.apache.flink.table.types.logical.VarCharType
+    an[UnsupportedOperationException] should be thrownBy {
+      ByteBufferEncoder.encode(new VarCharType())(ByteBuffer.wrap("bad".getBytes))
+    }
+  }
+
+  it should "throw on unsupported MapEncoder schema type" in {
+    import org.apache.flink.table.types.logical.IntType
+    an[UnsupportedOperationException] should be thrownBy {
+      Encoder[Map[String, Int]].encode(new IntType())(Map("a" -> 1))
+    }
+  }
+
+  it should "throw on unsupported LocalDateTimeEncoder schema type" in {
+    import org.apache.flink.table.types.logical.VarCharType
+    an[UnsupportedOperationException] should be thrownBy {
+      Encoder[LocalDateTime].encode(new VarCharType())(LocalDateTime.now())
+    }
   }
