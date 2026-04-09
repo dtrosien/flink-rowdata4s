@@ -333,9 +333,9 @@ trait ByteIterableEncoders:
   given Encoder[ByteBuffer]                                = ByteBufferEncoder
   given Encoder[Array[Byte]]                               = ByteArrayEncoder
   private val IterableByteEncoder: Encoder[Iterable[Byte]] = ByteArrayEncoder.contramap(_.toArray)
-  given Encoder[List[Byte]]                                = IterableByteEncoder.contramap(_.toIterable)
-  given Encoder[Vector[Byte]]                              = IterableByteEncoder.contramap(_.toIterable)
-  given Encoder[Seq[Byte]]                                 = IterableByteEncoder.contramap(_.toIterable)
+  given Encoder[List[Byte]]                                = IterableByteEncoder.contramap(identity)
+  given Encoder[Vector[Byte]]                              = IterableByteEncoder.contramap(identity)
+  given Encoder[Seq[Byte]]                                 = IterableByteEncoder.contramap(identity)
 
 object ByteBufferEncoder extends Encoder[ByteBuffer]:
   override def encode(logicalType: LogicalType): ByteBuffer => Any = {
