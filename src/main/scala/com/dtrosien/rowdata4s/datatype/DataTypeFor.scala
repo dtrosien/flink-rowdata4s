@@ -352,6 +352,6 @@ trait TupleSchemas:
     fields.add(DataTypes.FIELD("_3", c.dataType))
     fields.add(DataTypes.FIELD("_4", d.dataType))
     fields.add(DataTypes.FIELD("_5", e.dataType))
-    fields.add(DataTypes.FIELD("_6", e.dataType))
+    fields.add(DataTypes.FIELD("_6", f.dataType))
     DataTypes.ROW(fields).notNull
   }
