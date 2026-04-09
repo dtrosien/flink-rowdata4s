@@ -111,6 +111,16 @@ class DatatypesTest extends UnitSpec:
     dataType shouldBe dataTypeFromSchema
   }
 
+  it should "derive java.util.Date" in {
+    case class WithUtilDate(d: java.util.Date)
+    val dataType = FlinkDataType[WithUtilDate]
+
+    // deviates from Avro: java.util.Date behaves like an Instant and maps to TIMESTAMP_LTZ
+    dataType shouldBe DataTypes.ROW(
+      DataTypes.FIELD("d", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull)
+    ).notNull
+  }
+
   it should "use Annotations" in {
     case class Test(@TableName("ID_RENAMED") @AvroName("ID_RENAMED") id: Int, @TableTransient @AvroTransient id2: Int)
     val schema             = AvroSchema[Test]

@@ -4,6 +4,7 @@ import com.dtrosien.rowdata4s.annotations.TableName
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.api.DataTypes.{BIGINT, INT, STRING, VARCHAR}
+import org.apache.flink.table.types.logical.MultisetType
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.DataType
 import org.apache.flink.types.RowKind
@@ -504,4 +505,139 @@ class DecoderTest extends UnitSpec:
     val stringDecoder = intDecoder.map(_.toString)
     val result        = stringDecoder.decode(null)(42)
     result shouldBe "42"
+  }
+
+  it should "decode primitives from alternative input types" in {
+    // Byte decoder – actual Byte input
+    Decoder[Byte].decode(null)(42.toByte) shouldBe 42.toByte
+
+    // Short decoder – Byte and Short inputs
+    Decoder[Short].decode(null)(1.toByte) shouldBe 1.toShort
+    Decoder[Short].decode(null)(2.toShort) shouldBe 2.toShort
+
+    // Int decoder – Byte and Short inputs
+    Decoder[Int].decode(null)(1.toByte) shouldBe 1
+    Decoder[Int].decode(null)(2.toShort) shouldBe 2
+
+    // Long decoder – Byte, Short, and Int inputs
+    Decoder[Long].decode(null)(1.toByte) shouldBe 1L
+    Decoder[Long].decode(null)(2.toShort) shouldBe 2L
+    Decoder[Long].decode(null)(3) shouldBe 3L
+
+    // Double decoder – boxed java.lang.Double input
+    Decoder[Double].decode(null)(java.lang.Double.valueOf(1.5)) shouldBe 1.5
+
+    // Float decoder – boxed java.lang.Float input
+    Decoder[Float].decode(null)(java.lang.Float.valueOf(1.5f)) shouldBe 1.5f
+  }
+
+  it should "throw on unsupported primitive inputs" in {
+    an[UnsupportedOperationException] should be thrownBy Decoder[Int].decode(null)("bad")
+    an[UnsupportedOperationException] should be thrownBy Decoder[Long].decode(null)("bad")
+  }
+
+  it should "decode collections from alternative input types" in {
+    val logicalType = FlinkDataType[List[Int]].getLogicalType
+
+    // java.util.Collection input
+    val javaList = new java.util.ArrayList[Int]()
+    javaList.add(1)
+    javaList.add(2)
+    Decoder[List[Int]].decode(logicalType)(javaList) shouldBe List(1, 2)
+
+    // plain Scala Array input
+    Decoder[List[Int]].decode(logicalType)(Array(3, 4)) shouldBe List(3, 4)
+
+    // plain Scala Iterable input
+    Decoder[List[Int]].decode(logicalType)(Iterable(5, 6)) shouldBe List(5, 6)
+  }
+
+  it should "decode Array from alternative input types" in {
+    val logicalType = FlinkDataType[Array[Int]].getLogicalType
+
+    // java.util.Collection input
+    val javaList = new java.util.ArrayList[Int]()
+    javaList.add(10)
+    javaList.add(20)
+    Decoder[Array[Int]].decode(logicalType)(javaList) shouldBe Array(10, 20)
+
+    // plain Scala Iterable input
+    Decoder[Array[Int]].decode(logicalType)(Iterable(30, 40)) shouldBe Array(30, 40)
+
+    // plain Scala Array input
+    Decoder[Array[Int]].decode(logicalType)(Array(50, 60)) shouldBe Array(50, 60)
+  }
+
+  it should "decode Map from MULTISET logical type" in {
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("counts", DataTypes.MULTISET(STRING().notNull).notNull)
+    )
+    case class WithMultiset(counts: Map[Int, String])
+
+    val keyRow = GenericMapData(
+      Map(Int.box(1) -> StringData.fromString("a")).asJava
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, keyRow)
+      row
+    }
+
+    val fromRowData = FromRowData.apply[WithMultiset](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.counts shouldBe Map(1 -> "a")
+  }
+
+  it should "decode Map from java.util.Map input" in {
+    val logicalType = FlinkDataType[Map[String, Int]].getLogicalType
+
+    val javaMap = new java.util.HashMap[Any, Any]()
+    javaMap.put(StringData.fromString("x"), 99)
+
+    Decoder[Map[String, Int]].decode(logicalType)(javaMap) shouldBe Map("x" -> 99)
+  }
+
+  it should "decode Array[Byte] from ByteBuffer input" in {
+    val bytes  = "hello".getBytes
+    val result = ArrayByteDecoder.decode(null)(ByteBuffer.wrap(bytes))
+    result shouldBe bytes
+  }
+
+  it should "throw on unsupported ArrayByteDecoder input" in {
+    an[UnsupportedOperationException] should be thrownBy ArrayByteDecoder.decode(null)("bad")
+  }
+
+  it should "throw on unsupported ByteBufferDecoder input" in {
+    an[UnsupportedOperationException] should be thrownBy ByteBufferDecoder.decode(null)("bad")
+  }
+
+  it should "decode Instant from Int epoch millis" in {
+    val epochMillis = 1_000_000
+    val result      = Decoder[Instant].decode(null)(epochMillis)
+    result shouldBe Instant.ofEpochMilli(epochMillis.toLong)
+  }
+
+  it should "throw when all fields are null in a union ROW" in {
+    sealed trait St
+    case class A(a: String) extends St
+    case class B(b: Int)    extends St
+    case class Test(st: St)
+
+    val logicalType = FlinkDataType[Test].getLogicalType
+
+    val unionRow: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, null)
+      row.setField(1, null)
+      row
+    }
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, unionRow)
+      row
+    }
+
+    a[RuntimeException] should be thrownBy FromRowData.apply[Test](logicalType).from(rowData)
   }

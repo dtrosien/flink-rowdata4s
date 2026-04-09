@@ -354,3 +354,38 @@ class EncoderTest extends UnitSpec:
     val result       = longToInt.encode(null)(42L)
     result shouldBe Integer.valueOf(42)
   }
+
+  it should "throw on unsupported UUID schema type" in {
+    import org.apache.flink.table.types.logical.IntType
+    an[UnsupportedOperationException] should be thrownBy {
+      UUIDEncoder.encode(new IntType())(UUID.randomUUID())
+    }
+  }
+
+  it should "throw on unsupported ByteArrayEncoder schema type" in {
+    import org.apache.flink.table.types.logical.VarCharType
+    an[UnsupportedOperationException] should be thrownBy {
+      ByteArrayEncoder.encode(new VarCharType())("bad".getBytes)
+    }
+  }
+
+  it should "throw on unsupported ByteBufferEncoder schema type" in {
+    import org.apache.flink.table.types.logical.VarCharType
+    an[UnsupportedOperationException] should be thrownBy {
+      ByteBufferEncoder.encode(new VarCharType())(ByteBuffer.wrap("bad".getBytes))
+    }
+  }
+
+  it should "throw on unsupported MapEncoder schema type" in {
+    import org.apache.flink.table.types.logical.IntType
+    an[UnsupportedOperationException] should be thrownBy {
+      Encoder[Map[String, Int]].encode(new IntType())(Map("a" -> 1))
+    }
+  }
+
+  it should "throw on unsupported LocalDateTimeEncoder schema type" in {
+    import org.apache.flink.table.types.logical.VarCharType
+    an[UnsupportedOperationException] should be thrownBy {
+      Encoder[LocalDateTime].encode(new VarCharType())(LocalDateTime.now())
+    }
+  }
