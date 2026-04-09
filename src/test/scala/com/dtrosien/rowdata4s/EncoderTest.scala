@@ -316,8 +316,8 @@ class EncoderTest extends UnitSpec:
   it should "convert byte iterables" in {
     case class ByteIterables(listBytes: List[Byte], seqBytes: Seq[Byte], vecBytes: Vector[Byte])
 
-    val logicalType                            = FlinkDataType[ByteIterables].getLogicalType
-    val toRowData: ToRowData[ByteIterables]    = ToRowData.apply[ByteIterables](logicalType)
+    val logicalType                         = FlinkDataType[ByteIterables].getLogicalType
+    val toRowData: ToRowData[ByteIterables] = ToRowData.apply[ByteIterables](logicalType)
 
     val data    = "hello".getBytes.toList
     val rowData = toRowData.to(ByteIterables(data, data.toSeq, data.toVector))
@@ -333,8 +333,8 @@ class EncoderTest extends UnitSpec:
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("counts", MULTISET(STRING().notNull).notNull)
     )
-    val logicalType                         = customType.getLogicalType
-    val toRowData: ToRowData[WithMultiset]  = ToRowData.apply[WithMultiset](logicalType)
+    val logicalType                        = customType.getLogicalType
+    val toRowData: ToRowData[WithMultiset] = ToRowData.apply[WithMultiset](logicalType)
 
     val rowData = toRowData.to(WithMultiset(Map(1 -> "a")))
 
@@ -343,15 +343,15 @@ class EncoderTest extends UnitSpec:
   }
 
   it should "support Encoder.identity" in {
-    val enc     = Encoder.identity[String]
-    val result  = enc.encode(null)("hello")
+    val enc    = Encoder.identity[String]
+    val result = enc.encode(null)("hello")
     result shouldBe "hello"
   }
 
   it should "support Encoder.contramap" in {
-    val intEncoder   = Encoder[Int]
-    val longToInt    = intEncoder.contramap[Long](_.toInt)
-    val result       = longToInt.encode(null)(42L)
+    val intEncoder = Encoder[Int]
+    val longToInt  = intEncoder.contramap[Long](_.toInt)
+    val result     = longToInt.encode(null)(42L)
     result shouldBe Integer.valueOf(42)
   }
 

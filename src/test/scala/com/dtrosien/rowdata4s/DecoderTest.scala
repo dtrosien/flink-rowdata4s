@@ -395,7 +395,7 @@ class DecoderTest extends UnitSpec:
 
     val logicalType                    = FlinkDataType[Test].getLogicalType
     val fromRowData: FromRowData[Test] = FromRowData.apply[Test](logicalType)
-    val test = fromRowData.from(rowData)
+    val test                           = fromRowData.from(rowData)
 
     test.st shouldBe B("ABC", 123)
   }

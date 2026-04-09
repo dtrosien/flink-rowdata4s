@@ -391,7 +391,7 @@ object InstantEncoder extends Encoder[Instant]:
   }
 
 object LocalDateTimeEncoder extends Encoder[LocalDateTime]:
-  private def epochMillis(temporal: LocalDateTime): Long  = temporal.toInstant(ZoneOffset.UTC).toEpochMilli
+  private def epochMillis(temporal: LocalDateTime): Long = temporal.toInstant(ZoneOffset.UTC).toEpochMilli
 
   override def encode(logicalType: LogicalType): LocalDateTime => Any = {
     logicalType.getTypeRoot match
