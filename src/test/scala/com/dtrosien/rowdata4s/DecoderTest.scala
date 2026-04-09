@@ -259,8 +259,7 @@ class DecoderTest extends UnitSpec:
       row.setField(3, LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay.toInt)
       row.setField(4, TimestampData.fromInstant(testInstant))
       row.setField(5, StringData.fromString(testOffsetDateTime.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)))
-      // broken, since TIME_WITHOUT_TIMEZONE only stores integers  (see: org.apache.flink.table.data.RowData.createFieldGetter)
-      row.setField(6, Int.box(LocalTime.MIDNIGHT.toNanoOfDay.toInt))
+      row.setField(6, Int.box((LocalTime.of(10, 30).toNanoOfDay / 1_000_000).toInt))
       row
     }
 
@@ -276,7 +275,7 @@ class DecoderTest extends UnitSpec:
     timesAndDates.localDate shouldBe testDate
     timesAndDates.timestamp shouldBe Timestamp.from(testInstant)
     timesAndDates.offsetDateTime.toInstant shouldBe testOffsetDateTime.toInstant // use of instant to have stable tests
-    timesAndDates.localTime shouldBe LocalTime.MIDNIGHT
+    timesAndDates.localTime shouldBe LocalTime.of(10, 30)
 
   }
 

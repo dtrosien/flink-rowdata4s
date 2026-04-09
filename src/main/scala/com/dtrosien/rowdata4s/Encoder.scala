@@ -379,10 +379,10 @@ trait TemporalEncoders:
   given OffsetDateTimeEncoder: Encoder[OffsetDateTime] =
     StringEncoder.contramap[OffsetDateTime](_.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
 
-// flink uses TIME(9)
 object LocalTimeEncoder extends Encoder[LocalTime]:
   override def encode(logicalType: LogicalType): LocalTime => Any = {
-    { value => java.lang.Long.valueOf(value.toNanoOfDay) }
+    // Flink stores TIME_WITHOUT_TIME_ZONE as milliseconds-of-day as an int internally
+    { value => java.lang.Integer.valueOf((value.toNanoOfDay / 1_000_000).toInt) }
   }
 
 object InstantEncoder extends Encoder[Instant]:
@@ -392,8 +392,6 @@ object InstantEncoder extends Encoder[Instant]:
 
 object LocalDateTimeEncoder extends Encoder[LocalDateTime]:
   private def epochMillis(temporal: LocalDateTime): Long  = temporal.toInstant(ZoneOffset.UTC).toEpochMilli
-  private def epochSeconds(temporal: LocalDateTime): Long = temporal.toEpochSecond(ZoneOffset.UTC)
-  private def nanos(temporal: LocalDateTime): Long        = temporal.getNano.toLong
 
   override def encode(logicalType: LogicalType): LocalDateTime => Any = {
     logicalType.getTypeRoot match

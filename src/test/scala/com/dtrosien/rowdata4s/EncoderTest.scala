@@ -212,7 +212,7 @@ class EncoderTest extends UnitSpec:
       LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     )
 
-    rowData.getLong(5) shouldBe LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay
+    rowData.getInt(5) shouldBe (LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay / 1_000_000).toInt
 
     OffsetDateTime
       .parse(rowData.getString(6).toString, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
