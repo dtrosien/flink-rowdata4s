@@ -3,7 +3,7 @@ package com.dtrosien.rowdata4s
 import com.dtrosien.rowdata4s.annotations.TableName
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
 import org.apache.flink.table.api.DataTypes
-import org.apache.flink.table.api.DataTypes.{BIGINT, INT}
+import org.apache.flink.table.api.DataTypes.{BIGINT, INT, STRING, VARCHAR}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.DataType
 import org.apache.flink.types.RowKind
@@ -126,7 +126,8 @@ class DecoderTest extends UnitSpec:
         map: Map[String, Inner],
         arr: Array[Option[Inner]],
         seq: Seq[Int],
-        vec: Vector[String]
+        vec: Vector[String],
+        set: Set[String]
     )
 
     val logicalType = FlinkDataType[Collections].getLogicalType
@@ -137,7 +138,7 @@ class DecoderTest extends UnitSpec:
       row
     }
     val rowData: RowData = {
-      val row = new GenericRowData(RowKind.INSERT, 5)
+      val row = new GenericRowData(RowKind.INSERT, 6)
       row.setField(0, GenericArrayData(Array(true, false, true)))
       row.setField(
         1,
@@ -152,6 +153,7 @@ class DecoderTest extends UnitSpec:
             .map(_.asInstanceOf[Object])
         )
       )
+      row.setField(5, GenericArrayData(Array[Object](StringData.fromString("a"), StringData.fromString("b"))))
       row
     }
 
@@ -164,6 +166,7 @@ class DecoderTest extends UnitSpec:
     collections.arr shouldBe Array(None, Some(Inner("testString")), None)
     collections.seq shouldBe Seq(1, 2, 3)
     collections.vec shouldBe Vector("1", "2", "3")
+    collections.set shouldBe Set("a", "b")
 
   }
 
@@ -395,4 +398,110 @@ class DecoderTest extends UnitSpec:
     val test = fromRowData.from(rowData)
 
     test.st shouldBe B("ABC", 123)
+  }
+
+  it should "convert Byte and Short primitives" in {
+    case class SmallPrimitives(b: Byte, s: Short)
+
+    val logicalType = FlinkDataType[SmallPrimitives].getLogicalType
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(1))
+      row.setField(1, Int.box(2))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[SmallPrimitives](logicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.b shouldBe 1.toByte
+    result.s shouldBe 2.toShort
+  }
+
+  it should "convert byte iterables" in {
+    case class ByteIterables(listBytes: List[Byte], seqBytes: Seq[Byte], vecBytes: Vector[Byte])
+
+    val logicalType = FlinkDataType[ByteIterables].getLogicalType
+    val bytes       = "hello".getBytes
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 3)
+      row.setField(0, bytes)
+      row.setField(1, bytes)
+      row.setField(2, bytes)
+      row
+    }
+
+    val fromRowData = FromRowData.apply[ByteIterables](logicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.listBytes shouldBe bytes.toList
+    result.seqBytes shouldBe bytes.toSeq
+    result.vecBytes shouldBe bytes.toVector
+  }
+
+  it should "convert BigDecimal from String" in {
+    case class Decimal(dec: BigDecimal)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("dec", STRING().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, StringData.fromString("123.45"))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[Decimal](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.dec shouldBe BigDecimal("123.45")
+  }
+
+  it should "convert ByteBuffer from ByteBuffer input" in {
+    // ByteBufferDecoder handles ByteBuffer directly (bypassing FieldGetter which expects byte[])
+    val bytes   = "world".getBytes
+    val buf     = ByteBuffer.wrap(bytes)
+    val decoder = Decoder[ByteBuffer]
+    val result  = decoder.decode(FlinkDataType[ByteBuffer].getLogicalType)(buf)
+
+    result shouldBe buf
+  }
+
+  it should "decode String from plain String and CharSequence values" in {
+    // StringDecoder and CharSequenceDecoder accept raw String/CharSequence (not only StringData)
+    val stringDecoder = Decoder[String]
+    val csDecoder     = Decoder[CharSequence]
+    val logicalType   = FlinkDataType[String].getLogicalType
+
+    stringDecoder.decode(logicalType)("plain") shouldBe "plain"
+    csDecoder.decode(logicalType)(new StringBuilder("chars")).toString shouldBe "chars"
+  }
+
+  it should "use default value when field fails to decode" in {
+    case class WithDefault(id: Int, name: String = "fallback")
+
+    val logicalType = FlinkDataType[WithDefault].getLogicalType
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(7))
+      row.setField(1, null) // null causes StringDecoder to throw; default kicks in
+      row
+    }
+
+    val fromRowData = FromRowData.apply[WithDefault](logicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.id shouldBe 7
+    result.name shouldBe "fallback"
+  }
+
+  it should "support Decoder.map" in {
+    val intDecoder    = Decoder[Int]
+    val stringDecoder = intDecoder.map(_.toString)
+    val result        = stringDecoder.decode(null)(42)
+    result shouldBe "42"
   }
