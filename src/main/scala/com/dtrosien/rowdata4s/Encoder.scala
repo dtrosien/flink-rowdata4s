@@ -326,10 +326,24 @@ class MapEncoder[K, V](encoderK: Encoder[K], encoderV: Encoder[V]) extends Encod
 // ==============================================
 
 trait BigDecimalEncoders:
-  given Encoder[BigDecimal] = new Encoder[BigDecimal]:
-    override def encode(logicalType: LogicalType): BigDecimal => Any = { bd =>
-      DecimalData.fromBigDecimal(bd.underlying(), bd.precision, bd.scale)
-    }
+  given Encoder[BigDecimal] = BigDecimalEncoder
+
+/** Encodes a BigDecimal with the precision and scale of the DECIMAL column. Flink serializes decimals as an unscaled
+  * value and re-applies the column's scale when reading, so a [[DecimalData]] carrying any other scale would be read
+  * back as a different number. Extra fractional digits are rounded HALF_UP like Flink's CAST; a value whose integer
+  * part does not fit the column's precision cannot be represented and is rejected.
+  */
+object BigDecimalEncoder extends Encoder[BigDecimal]:
+  override def encode(logicalType: LogicalType): BigDecimal => Any = logicalType match
+    case decimalType: DecimalType =>
+      val precision = decimalType.getPrecision
+      val scale     = decimalType.getScale
+      bd =>
+        val decimal = DecimalData.fromBigDecimal(bd.underlying, precision, scale)
+        if decimal == null then
+          throw new IllegalArgumentException(s"BigDecimal $bd does not fit DECIMAL($precision, $scale)")
+        decimal
+    case _ => bd => DecimalData.fromBigDecimal(bd.underlying, bd.precision, bd.scale)
 
 // ==============================================
 // Bytes   ======================================

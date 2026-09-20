@@ -27,6 +27,7 @@ lazy val root = (project in file(".")).settings(
     "com.softwaremill.magnolia1_3" %% "magnolia"             % "1.3.18",
     "org.apache.flink"              % "flink-table-api-java" % flinkVersion % Provided,
     "org.apache.flink"              % "flink-avro"           % flinkVersion % Test,
+    "org.apache.flink"              % "flink-table-runtime"  % flinkVersion % Test,
     "com.sksamuel.avro4s"          %% "avro4s-core"          % "5.0.15"     % Test,
     "org.scalatest"                %% "scalatest"            % "3.2.19"     % Test,
     "org.scalatestplus"            %% "scalacheck-1-19"      % "3.2.19.0"   % Test,
