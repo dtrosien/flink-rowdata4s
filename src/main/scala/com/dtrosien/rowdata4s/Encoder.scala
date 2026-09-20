@@ -7,11 +7,11 @@ import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.logical.*
 import org.apache.flink.table.types.logical.LogicalTypeRoot.*
+import org.apache.flink.types.RowKind
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
-import java.time.format.DateTimeFormatter
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
@@ -19,16 +19,29 @@ import scala.util.NotGiven
 
 /** Converts a case class T to a Flink [[RowData]]
   */
-trait ToRowData[T <: Product](using NotGiven[T <:< reflect.Enum]) extends Serializable {
-  def to(t: T): RowData
+trait ToRowData[T <: Product] extends Serializable {
+
+  /** Converts `t` to a [[RowData]] with row kind `INSERT`.
+    */
+  def to(t: T): RowData = to(t, RowKind.INSERT)
+
+  /** Converts `t` to a [[RowData]] carrying the given [[RowKind]], e.g. to forward the kind of a changelog record
+    * (`toRowData.to(value, sourceRow.getRowKind)`) or to emit a `DELETE` for an upsert sink.
+    */
+  def to(t: T, rowKind: RowKind): RowData
 }
 
 object ToRowData {
   def apply[T <: Product](
       logicalType: LogicalType
   )(using encoder: Encoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): ToRowData[T] = new ToRowData[T] {
-    def to(t: T): RowData = encoder.encode(logicalType).apply(t) match {
-      case rowData: RowData => rowData
+    // cache resolved schema
+    private val encode: T => Any = encoder.encode(logicalType)
+
+    def to(t: T, rowKind: RowKind): RowData = encode(t) match {
+      case rowData: RowData =>
+        rowData.setRowKind(rowKind)
+        rowData
       case output =>
         val clazz = output.getClass
         throw new UnsupportedOperationException(
@@ -48,7 +61,10 @@ trait Encoder[T] extends Serializable {
   /** Returns an [[Encoder[U]] by applying a function that maps a U to an T, before encoding as an T using this encoder.
     */
   final def contramap[U](f: U => T): Encoder[U] = new Encoder[U] {
-    override def encode(logicalType: LogicalType): U => Any = { u => self.encode(logicalType).apply(f(u)) }
+    override def encode(logicalType: LogicalType): U => Any = {
+      val encodeT = self.encode(logicalType)
+      u => encodeT(f(u))
+    }
   }
 }
 
@@ -81,13 +97,12 @@ object Encoder
 
 trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
   override def join[T](ctx: CaseClass[Encoder, T]): Encoder[T] = DatatypeShape.of(ctx) match {
-    case CaseClassShape.Record    => RowEncoder(ctx)
-    case CaseClassShape.ValueType => RowEncoder(ctx)
-    case CaseClassShape.Object    => ObjectEncoder(ctx)
+    case CaseClassShape.Record => RowEncoder(ctx)
+    case CaseClassShape.Object => ObjectEncoder(ctx)
   }
 
   override def split[T](ctx: SealedTrait[Encoder, T]): Encoder[T] =
-    DatatypeShape.of[T](ctx) match {
+    DatatypeShape.of(ctx)(_.isInstanceOf[ObjectEncoder[?]]) match {
       case SealedTraitShape.TypeUnion =>
         ctx.subtypes match {
           case IArray(single) => single.typeclass.asInstanceOf[Encoder[T]]
@@ -100,38 +115,63 @@ trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
 // TypeUnion   ==================================
 // ==============================================
 
+/** Encodes a sealed trait as a ROW with one nullable field per subtype (matched by name); only the field of the
+  * actual subtype is set.
+  */
 class TypeUnionEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
   def encode(logicalType: LogicalType): T => Any = {
-    require(!logicalType.getChildren.isEmpty)
-    val encoderBySubtype = ctx.subtypes.zipWithIndex
-      .map((st, i) => {
-        val annos: Annotations       = new Annotations(st.annotations, st.inheritedAnnotations)
-        val names                    = Names(st.typeInfo, annos)
-        val subDataType: LogicalType = logicalType.getChildren.get(i)
-        val encodeT: T => Any        = st.typeclass.asInstanceOf[Encoder[T]].encode(subDataType)
-        (st, (i, encodeT))
-      })
-      .toMap
+    require(logicalType.getTypeRoot == LogicalTypeRoot.ROW)
+    val fields = logicalType.asInstanceOf[RowType].getFields.asScala.toIndexedSeq
+    val arity  = fields.length
+
+    // resolved once per schema, by position in ctx.subtypes: the schema field of the subtype and its encoder
+    val fieldIndexBySubtype = new Array[Int](ctx.subtypes.length)
+    val encoderBySubtype    = new Array[T => Any](ctx.subtypes.length)
+    ctx.subtypes.zipWithIndex.foreach { (st, position) =>
+      val name = Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name
+      val i    = fields.indexWhere(_.getName == name)
+      if i == -1 then throw new IllegalArgumentException(s"Unable to find union field for subtype $name")
+      fieldIndexBySubtype(position) = i
+      encoderBySubtype(position) = st.typeclass.asInstanceOf[Encoder[T]].encode(fields(i).getType)
+    }
 
     { value =>
-      val rowSize = logicalType.getChildren.size()
-      val fields  = new Array[AnyRef](rowSize)
-      ctx.choose(value) { st =>
-        val (index, encodeT) = encoderBySubtype(st.subtype)
-        fields(index) = encodeT.apply(st.cast(value)).asInstanceOf[AnyRef]
-        GenericRowData.of(fields*)
-      }
+      val position = Subtypes.positionOf(ctx, value)
+      val row      = new GenericRowData(arity)
+      row.setField(fieldIndexBySubtype(position), encoderBySubtype(position)(value).asInstanceOf[AnyRef])
+      row
     }
   }
 }
+
+private[rowdata4s] object Subtypes:
+
+  /** Position of the subtype of `value` in `ctx.subtypes`, the same scan as `ctx.choose` without the allocation.
+    * `Subtype.index` is not used because it is not unique for nested sealed hierarchies.
+    */
+  def positionOf[F[_], T](ctx: SealedTrait[F, T], value: T): Int =
+    val subtypes = ctx.subtypes
+    var i        = 0
+    while i < subtypes.length && !subtypes(i).cast.isDefinedAt(value) do i += 1
+    if i == subtypes.length then
+      throw new IllegalArgumentException(s"The given value `$value` is not a sub type of `${ctx.typeInfo.full}`")
+    i
 
 // ==============================================
 // Enums   ======================================
 // ==============================================
 
+/** Encodes enums and sealed traits of case objects as their (annotation aware) name, the same name the decoder
+  * matches on.
+  */
 class EnumEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
-  def encode(logicalType: LogicalType): T => Any = { (value: T) =>
-    ctx.choose(value) { st => StringEncoder.encode(logicalType)(st.typeInfo.short) }
+  def encode(logicalType: LogicalType): T => Any = {
+    val encodeString = StringEncoder.encode(logicalType)
+    // plain Strings by position in ctx.subtypes; StringData is not serializable and is created per record
+    val namesBySubtype: Array[String] = ctx.subtypes.map { st =>
+      Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name
+    }.toArray
+    { (value: T) => encodeString(namesBySubtype(Subtypes.positionOf(ctx, value))) }
   }
 }
 
@@ -140,8 +180,10 @@ class EnumEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
 // ==============================================
 
 class ObjectEncoder[T](ctx: magnolia1.CaseClass[Encoder, T]) extends Encoder[T] {
-  def encode(logicalType: LogicalType): T => Any = { (value: T) =>
-    StringEncoder.encode(logicalType)(ctx.typeInfo.short)
+  def encode(logicalType: LogicalType): T => Any = {
+    val encodeString = StringEncoder.encode(logicalType)
+    val name         = ctx.typeInfo.short
+    { (value: T) => encodeString(name) }
   }
 }
 
@@ -181,15 +223,15 @@ class RowEncoder[T](ctx: magnolia1.CaseClass[Encoder, T]) extends Encoder[T] {
   }
 
   private def encodeT(encoders: Array[FieldEncoder[T]], t: T): GenericRowData = {
-    // hot code path. Sacrificing functional programming to the gods of performance.
+    // fields are written directly into the row, GenericRowData.of would copy them from a varargs array
     val length = encoders.length
-    val values = new Array[Any](length)
+    val row    = new GenericRowData(length)
     var i      = 0
     while i < length do {
-      values(i) = encoders(i).encode(t)
+      row.setField(i, encoders(i).encode(t).asInstanceOf[AnyRef])
       i += 1
     }
-    GenericRowData.of(values*)
+    row
   }
 }
 
@@ -207,18 +249,73 @@ class FieldEncoder[T](param: magnolia1.CaseClass.Param[Encoder, T], logicalType:
 // ==============================================
 
 trait PrimitiveEncoders {
-  given LongEncoder: Encoder[Long]       = Encoder(a => java.lang.Long.valueOf(a))
+  given Encoder[Long]                    = LongEncoder
   given Encoder[Int]                     = IntEncoder
-  given ShortEncoder: Encoder[Short]     = Encoder(a => java.lang.Short.valueOf(a))
-  given ByteEncoder: Encoder[Byte]       = Encoder(a => java.lang.Byte.valueOf(a))
-  given DoubleEncoder: Encoder[Double]   = Encoder(a => java.lang.Double.valueOf(a))
-  given FloatEncoder: Encoder[Float]     = Encoder(a => java.lang.Float.valueOf(a))
+  given Encoder[Short]                   = ShortEncoder
+  given Encoder[Byte]                    = ByteEncoder
+  given Encoder[Double]                  = DoubleEncoder
+  given Encoder[Float]                   = FloatEncoder
   given BooleanEncoder: Encoder[Boolean] = Encoder(a => java.lang.Boolean.valueOf(a))
 }
 
-object IntEncoder extends Encoder[Int] {
-  override def encode(logicalType: LogicalType): Int => Any = { value => java.lang.Integer.valueOf(value) }
-}
+/** Converts to the integer column type the serializer expects: widening is lossless, narrowing wraps around. DATE
+  * is stored as an int (epoch days) and is used by the LocalDate and Date encoders.
+  */
+object IntEncoder extends Encoder[Int]:
+  override def encode(logicalType: LogicalType): Int => Any = logicalType.getTypeRoot match
+    case TINYINT        => value => java.lang.Byte.valueOf(value.toByte)
+    case SMALLINT       => value => java.lang.Short.valueOf(value.toShort)
+    case INTEGER | DATE => value => java.lang.Integer.valueOf(value)
+    case BIGINT         => value => java.lang.Long.valueOf(value.toLong)
+    case _ =>
+      throw new UnsupportedOperationException(s"IntEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+/** Converts to the floating point column type the serializer expects: Float into DOUBLE is lossless, Double into
+  * FLOAT loses precision like a JVM cast.
+  */
+object FloatEncoder extends Encoder[Float]:
+  override def encode(logicalType: LogicalType): Float => Any = logicalType.getTypeRoot match
+    case FLOAT  => value => java.lang.Float.valueOf(value)
+    case DOUBLE => value => java.lang.Double.valueOf(value.toDouble)
+    case _ =>
+      throw new UnsupportedOperationException(s"FloatEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+object DoubleEncoder extends Encoder[Double]:
+  override def encode(logicalType: LogicalType): Double => Any = logicalType.getTypeRoot match
+    case FLOAT  => value => java.lang.Float.valueOf(value.toFloat)
+    case DOUBLE => value => java.lang.Double.valueOf(value)
+    case _ =>
+      throw new UnsupportedOperationException(s"DoubleEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+object LongEncoder extends Encoder[Long]:
+  override def encode(logicalType: LogicalType): Long => Any = logicalType.getTypeRoot match
+    case TINYINT  => value => java.lang.Byte.valueOf(value.toByte)
+    case SMALLINT => value => java.lang.Short.valueOf(value.toShort)
+    case INTEGER  => value => java.lang.Integer.valueOf(value.toInt)
+    case BIGINT   => value => java.lang.Long.valueOf(value)
+    case _ =>
+      throw new UnsupportedOperationException(s"LongEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+/** The derived DataType maps Byte to INT, so the value is widened to the column type the serializer expects.
+  */
+object ByteEncoder extends Encoder[Byte]:
+  override def encode(logicalType: LogicalType): Byte => Any = logicalType.getTypeRoot match
+    case TINYINT  => value => java.lang.Byte.valueOf(value)
+    case SMALLINT => value => java.lang.Short.valueOf(value.toShort)
+    case INTEGER  => value => java.lang.Integer.valueOf(value.toInt)
+    case BIGINT   => value => java.lang.Long.valueOf(value.toLong)
+    case _ =>
+      throw new UnsupportedOperationException(s"ByteEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+/** The derived DataType maps Short to INT, so the value is widened to the column type the serializer expects.
+  */
+object ShortEncoder extends Encoder[Short]:
+  override def encode(logicalType: LogicalType): Short => Any = logicalType.getTypeRoot match
+    case SMALLINT => value => java.lang.Short.valueOf(value)
+    case INTEGER  => value => java.lang.Integer.valueOf(value.toInt)
+    case BIGINT   => value => java.lang.Long.valueOf(value.toLong)
+    case _ =>
+      throw new UnsupportedOperationException(s"ShortEncoder doesn't support schema type ${logicalType.getTypeRoot}")
 
 // ==============================================
 // String   =====================================
@@ -229,8 +326,28 @@ trait StringEncoders:
   given Encoder[CharSequence] = StringEncoder.contramap(_.toString())
   given Encoder[UUID]         = UUIDEncoder
 
+/** Strings are fitted to the declared length of the column, like Flink's CAST: truncated for `VARCHAR(n)`,
+  * truncated or padded with spaces for `CHAR(n)`. `STRING` (`VARCHAR(MAX)`) and a null schema leave them untouched.
+  * Lengths count code points, as Flink does.
+  */
 object StringEncoder extends Encoder[String]:
-  override def encode(logicalType: LogicalType): String => Any = string => StringData.fromString(string)
+  override def encode(logicalType: LogicalType): String => Any = logicalType match
+    case varchar: VarCharType if varchar.getLength < VarCharType.MAX_LENGTH =>
+      val length = varchar.getLength
+      string => StringData.fromString(truncate(string, length))
+    case char: CharType =>
+      val length = char.getLength
+      string => StringData.fromString(pad(truncate(string, length), length))
+    case null | _: VarCharType => string => StringData.fromString(string)
+    case _ => throw new UnsupportedOperationException(s"StringEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+  private def truncate(string: String, length: Int): String =
+    if string.codePointCount(0, string.length) <= length then string
+    else string.substring(0, string.offsetByCodePoints(0, length))
+
+  private def pad(string: String, length: Int): String =
+    val missing = length - string.codePointCount(0, string.length)
+    if missing <= 0 then string else string + " " * missing
 
 object UUIDEncoder extends Encoder[UUID]:
   override def encode(logicalType: LogicalType): UUID => Any = logicalType.getTypeRoot match {
@@ -300,7 +417,7 @@ class MapEncoder[K, V](encoderK: Encoder[K], encoderV: Encoder[V]) extends Encod
   override def encode(logicalType: LogicalType): Map[K, V] => Any = {
     val (encodeK, encodeV) = logicalType.getTypeRoot match
       case MULTISET =>
-        (encoderK.encode(IntType()), encoderV.encode(logicalType.asInstanceOf[MultisetType].getElementType))
+        (encoderK.encode(logicalType.asInstanceOf[MultisetType].getElementType), encoderV.encode(IntType(false)))
       case MAP =>
         (
           encoderK.encode(logicalType.asInstanceOf[MapType].getKeyType),
@@ -320,10 +437,24 @@ class MapEncoder[K, V](encoderK: Encoder[K], encoderV: Encoder[V]) extends Encod
 // ==============================================
 
 trait BigDecimalEncoders:
-  given Encoder[BigDecimal] = new Encoder[BigDecimal]:
-    override def encode(logicalType: LogicalType): BigDecimal => Any = { bd =>
-      DecimalData.fromBigDecimal(bd.underlying(), bd.precision, bd.scale)
-    }
+  given Encoder[BigDecimal] = BigDecimalEncoder
+
+/** Encodes a BigDecimal with the precision and scale of the DECIMAL column. Flink serializes decimals as an unscaled
+  * value and re-applies the column's scale when reading, so a [[DecimalData]] carrying any other scale would be read
+  * back as a different number. Extra fractional digits are rounded HALF_UP like Flink's CAST; a value whose integer
+  * part does not fit the column's precision cannot be represented and is rejected.
+  */
+object BigDecimalEncoder extends Encoder[BigDecimal]:
+  override def encode(logicalType: LogicalType): BigDecimal => Any = logicalType match
+    case decimalType: DecimalType =>
+      val precision = decimalType.getPrecision
+      val scale     = decimalType.getScale
+      bd =>
+        val decimal = DecimalData.fromBigDecimal(bd.underlying, precision, scale)
+        if decimal == null then
+          throw new IllegalArgumentException(s"BigDecimal $bd does not fit DECIMAL($precision, $scale)")
+        decimal
+    case _ => bd => DecimalData.fromBigDecimal(bd.underlying, bd.precision, bd.scale)
 
 // ==============================================
 // Bytes   ======================================
@@ -370,14 +501,16 @@ object ByteArrayEncoder extends Encoder[Array[Byte]]:
 trait TemporalEncoders:
   given Encoder[Instant]                     = InstantEncoder
   given TimestampEncoder: Encoder[Timestamp] = InstantEncoder.contramap[Timestamp](_.toInstant)
+  // java.util.Date behaves like an instant (DataTypeFor maps it to TIMESTAMP_LTZ)
+  given UtilDateEncoder: Encoder[java.util.Date] = InstantEncoder.contramap[java.util.Date](_.toInstant)
 
   given LocalDateEncoder: Encoder[LocalDate] = IntEncoder.contramap[LocalDate](_.toEpochDay.toInt)
   given Encoder[LocalTime]                   = LocalTimeEncoder
   given Encoder[LocalDateTime]               = LocalDateTimeEncoder
 
   given DateEncoder: Encoder[Date] = IntEncoder.contramap[Date](_.toLocalDate.toEpochDay.toInt)
-  given OffsetDateTimeEncoder: Encoder[OffsetDateTime] =
-    StringEncoder.contramap[OffsetDateTime](_.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+  // an OffsetDateTime is an instant, the offset itself is not kept
+  given OffsetDateTimeEncoder: Encoder[OffsetDateTime] = InstantEncoder.contramap[OffsetDateTime](_.toInstant)
 
 object LocalTimeEncoder extends Encoder[LocalTime]:
   override def encode(logicalType: LogicalType): LocalTime => Any = {
@@ -385,9 +518,22 @@ object LocalTimeEncoder extends Encoder[LocalTime]:
     { value => java.lang.Integer.valueOf((value.toNanoOfDay / 1_000_000).toInt) }
   }
 
+/** Flink stores TIMESTAMP columns with precision <= 3 as milliseconds only and its serializer asserts that the
+  * nano-of-millisecond part is zero (it is silently dropped without `-ea`). Values are truncated to milliseconds for
+  * those columns so that the behaviour does not depend on assertions being enabled.
+  */
+private[rowdata4s] object Timestamps:
+  def precisionOf(logicalType: LogicalType): Int = logicalType match
+    case t: TimestampType           => t.getPrecision
+    case t: LocalZonedTimestampType => t.getPrecision
+    case _                          => TimestampType.MAX_PRECISION
+
+  def isCompact(logicalType: LogicalType): Boolean = TimestampData.isCompact(precisionOf(logicalType))
+
 object InstantEncoder extends Encoder[Instant]:
   override def encode(logicalType: LogicalType): Instant => Any = {
-    { value => TimestampData.fromInstant(value) }
+    if Timestamps.isCompact(logicalType) then { value => TimestampData.fromEpochMillis(value.toEpochMilli) }
+    else { value => TimestampData.fromInstant(value) }
   }
 
 object LocalDateTimeEncoder extends Encoder[LocalDateTime]:
@@ -396,6 +542,8 @@ object LocalDateTimeEncoder extends Encoder[LocalDateTime]:
   override def encode(logicalType: LogicalType): LocalDateTime => Any = {
     logicalType.getTypeRoot match
       case BIGINT => value => java.lang.Long.valueOf(epochMillis(value))
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE | TIMESTAMP_WITHOUT_TIME_ZONE if Timestamps.isCompact(logicalType) =>
+        value => TimestampData.fromEpochMillis(epochMillis(value))
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE | TIMESTAMP_WITHOUT_TIME_ZONE =>
         value => TimestampData.fromLocalDateTime(value)
       case _ =>

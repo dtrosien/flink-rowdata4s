@@ -1,16 +1,22 @@
 package com.dtrosien.rowdata4s
 
+import com.dtrosien.rowdata4s.annotations.{TableChar, TableDecimal, TableName, TableVarchar}
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
+import org.apache.flink.core.memory.{DataInputDeserializer, DataOutputSerializer}
 import org.apache.flink.table.api.DataTypes
-import org.apache.flink.table.api.DataTypes.{INT, MAP, MULTISET, STRING}
-import org.apache.flink.table.data.TimestampData
+import org.apache.flink.table.api.DataTypes.{DECIMAL, INT, MAP, MULTISET, STRING}
+import org.apache.flink.table.data.{RowData, TimestampData}
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.TimestampType
+import org.apache.flink.table.types.logical.{BigIntType, CharType, DoubleType, FloatType, IntType, RowType, SmallIntType, TimestampType, TinyIntType, VarCharType}
+import org.apache.flink.types.RowKind
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
@@ -66,6 +72,42 @@ class EncoderTest extends UnitSpec:
 
     rowData.getRow(1, 1).getString(0).toString shouldBe "someName"
 
+  }
+
+  it should "fit Strings to the declared column length" in {
+    val stringEncoder = Encoder[String]
+
+    // VARCHAR(n) truncates, STRING (VARCHAR(MAX)) does not
+    stringEncoder.encode(new VarCharType(3))("abcdef").toString shouldBe "abc"
+    stringEncoder.encode(new VarCharType(3))("ab").toString shouldBe "ab"
+    stringEncoder.encode(new VarCharType(VarCharType.MAX_LENGTH))("abcdef").toString shouldBe "abcdef"
+
+    // CHAR(n) truncates or pads with spaces
+    stringEncoder.encode(new CharType(5))("ab").toString shouldBe "ab   "
+    stringEncoder.encode(new CharType(2))("abc").toString shouldBe "ab"
+
+    // lengths count code points, not UTF-16 units
+    stringEncoder.encode(new VarCharType(2))("\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00").toString shouldBe "\uD83D\uDE00\uD83D\uDE00"
+  }
+
+  it should "reject a String field on a column that is not CHAR or VARCHAR" in {
+    case class Test(name: String)
+    val customType: DataType = DataTypes.ROW(DataTypes.FIELD("name", INT().notNull))
+
+    an[UnsupportedOperationException] should be thrownBy ToRowData.apply[Test](customType.getLogicalType)
+  }
+
+  it should "truncate annotated String fields through the derived schema" in {
+    case class Test(@TableVarchar(3) name: String, @TableChar(2) country: String)
+
+    val logicalType                = FlinkDataType[Test].getLogicalType
+    val toRowData: ToRowData[Test] = ToRowData.apply[Test](logicalType)
+
+    val rowData = toRowData.to(Test("Alice", "D"))
+
+    rowData.getString(0).toString shouldBe "Ali"
+    rowData.getString(1).toString shouldBe "D "
+    FromRowData.apply[Test](logicalType).from(rowData) shouldBe Test("Ali", "D ")
   }
 
   it should "convert String" in {
@@ -150,6 +192,72 @@ class EncoderTest extends UnitSpec:
 
   }
 
+  it should "encode big decimals with the precision and scale of a @TableDecimal annotation" in {
+    case class Deci(@TableDecimal(18, 4) amount: BigDecimal)
+    val deci = Deci(BigDecimal("12345678901234.5"))
+
+    val logicalType                = FlinkDataType[Deci].getLogicalType
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](logicalType)
+
+    val rowData = toRowData.to(deci)
+
+    rowData.getDecimal(0, 18, 4).toBigDecimal shouldBe new java.math.BigDecimal("12345678901234.5000")
+    FromRowData.apply[Deci](logicalType).from(rowData) shouldBe Deci(BigDecimal("12345678901234.5000"))
+  }
+
+  it should "convert big decimals with the scale of the column" in {
+    case class Deci(bigDecimal: BigDecimal)
+    val deci = Deci(BigDecimal("1.5")) // scale 1, column has scale 2
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bigDecimal", DECIMAL(10, 2).notNull)
+    )
+    val logicalType                = customType.getLogicalType
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](logicalType)
+
+    val rowData = toRowData.to(deci)
+
+    rowData.getDecimal(0, 10, 2).scale shouldBe 2
+
+    // flink serializes the unscaled value and re-applies the column scale when reading
+    val serializer = new RowDataSerializer(logicalType.asInstanceOf[RowType])
+    val out        = new DataOutputSerializer(64)
+    serializer.serialize(rowData, out)
+    val deserialized: RowData = serializer.deserialize(new DataInputDeserializer(out.getCopyOfBuffer))
+
+    deserialized.getDecimal(0, 10, 2).toBigDecimal shouldBe new java.math.BigDecimal("1.50")
+    FromRowData.apply[Deci](logicalType).from(deserialized) shouldBe Deci(BigDecimal("1.50"))
+
+  }
+
+  it should "round big decimals with more fractional digits than the column" in {
+    case class Deci(bigDecimal: BigDecimal)
+    val deci = Deci(BigDecimal("1.005"))
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bigDecimal", DECIMAL(10, 2).notNull)
+    )
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](customType.getLogicalType)
+
+    val rowData = toRowData.to(deci)
+
+    rowData.getDecimal(0, 10, 2).toBigDecimal shouldBe new java.math.BigDecimal("1.01")
+
+  }
+
+  it should "throw on big decimals that do not fit the column precision" in {
+    case class Deci(bigDecimal: BigDecimal)
+    val deci = Deci(BigDecimal("123456789.123"))
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bigDecimal", DECIMAL(10, 2).notNull)
+    )
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](customType.getLogicalType)
+
+    an[IllegalArgumentException] should be thrownBy toRowData.to(deci)
+
+  }
+
   it should "convert bytes" in {
     case class Bytes(bytes: Array[Byte], bytebuffer: ByteBuffer)
     val logicalType = FlinkDataType[Bytes].getLogicalType
@@ -172,6 +280,18 @@ class EncoderTest extends UnitSpec:
     val rowData                   = toRowData.to(tup)
 
     rowData.getRow(0, 2).getString(0).toString shouldBe "3"
+  }
+
+  it should "convert java.util.Date like an Instant" in {
+    case class WithUtilDate(d: java.util.Date)
+    val instant = Instant.parse("2026-09-20T10:15:30.123Z")
+
+    val logicalType                        = FlinkDataType[WithUtilDate].getLogicalType // TIMESTAMP_LTZ(3)
+    val toRowData: ToRowData[WithUtilDate] = ToRowData.apply[WithUtilDate](logicalType)
+
+    val rowData = toRowData.to(WithUtilDate(java.util.Date.from(instant)))
+
+    rowData.getTimestamp(0, 3).toInstant shouldBe instant
   }
 
   it should "convert temporal types" in {
@@ -201,29 +321,50 @@ class EncoderTest extends UnitSpec:
     val toRowData: ToRowData[TimeAndDates] = ToRowData.apply[TimeAndDates](logicalType)
     val rowData                            = toRowData.to(timeAndDates)
 
-    // checks
-    rowData.getLong(0) shouldBe testInstant.toEpochMilli
+    // checks: the derived schema uses precision 6 (TIMESTAMP for wall-clock values, TIMESTAMP_LTZ for instants),
+    // which keeps the sub-millisecond part of the values
+    rowData.getTimestamp(0, 6).toLocalDateTime shouldBe LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     rowData.getInt(1) shouldBe LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay
-    rowData.getTimestamp(2, 8).toInstant shouldBe testInstant
+    rowData.getTimestamp(2, 6).toInstant shouldBe testInstant
     rowData.getInt(3) shouldBe LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay
 
     // flink timestamp is transformed to LocalDateTimeFirst before getting converted to Timestamp
-    rowData.getTimestamp(4, 8).toTimestamp shouldBe Timestamp.valueOf(
+    rowData.getTimestamp(4, 6).toTimestamp shouldBe Timestamp.valueOf(
       LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     )
 
     rowData.getInt(5) shouldBe (LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay / 1_000_000).toInt
 
-    OffsetDateTime
-      .parse(rowData.getString(6).toString, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
-      .toInstant shouldBe OffsetDateTime
-      .ofInstant(testInstant, ZoneOffset.UTC)
-      .toInstant // use of instant to have stable tests
+    rowData.getTimestamp(6, 6).toInstant shouldBe testInstant
 
-    // TIMESTAMP_WITHOUT_TIME_ZONE branch (FlinkDataType uses BIGINT for LocalDateTime by default)
+    // BIGINT columns take LocalDateTime as epoch millis, TIMESTAMP(3) truncates to millis
     val ldt = LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
-    Encoder[LocalDateTime].encode(new TimestampType(false, 3))(ldt) shouldBe TimestampData.fromLocalDateTime(ldt)
+    Encoder[LocalDateTime].encode(new BigIntType())(ldt) shouldBe java.lang.Long.valueOf(testInstant.toEpochMilli)
+    Encoder[LocalDateTime].encode(new TimestampType(false, 6))(ldt) shouldBe TimestampData.fromLocalDateTime(ldt)
+    Encoder[LocalDateTime].encode(new TimestampType(false, 3))(ldt) shouldBe
+      TimestampData.fromLocalDateTime(ldt.truncatedTo(ChronoUnit.MILLIS))
 
+  }
+
+  it should "convert rich enums as unions and read them back" in {
+    enum Shape {
+      case Circle(radius: Double)
+      case Rect(width: Int, height: Int)
+      case Unknown
+    }
+    case class Record(id: Int, shape: Shape)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+    val fromRowData                  = FromRowData.apply[Record](logicalType)
+
+    val circle = toRowData.to(Record(1, Shape.Circle(2.5)))
+    circle.getRow(1, 3).getRow(0, 1).getDouble(0) shouldBe 2.5 // payload is kept
+    circle.getRow(1, 3).isNullAt(1) shouldBe true
+    circle.getRow(1, 3).isNullAt(2) shouldBe true
+
+    for shape <- Seq(Shape.Circle(2.5), Shape.Rect(3, 4), Shape.Unknown) do
+      fromRowData.from(toRowData.to(Record(1, shape))) shouldBe Record(1, shape)
   }
 
   it should "convert enums" in {
@@ -272,6 +413,52 @@ class EncoderTest extends UnitSpec:
     rowData.getRow(0, 1).getInt(1) shouldBe 123
   }
 
+  it should "write union fields by name when the schema lists the variants in another order" in {
+    sealed trait Shape
+    case class Circle(radius: Double)          extends Shape
+    case class Rect(width: Int, height: Int)   extends Shape
+    case class Record(id: Int, shape: Shape)
+
+    // derived order is Circle, Rect; the table lists Rect first
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", INT().notNull),
+      DataTypes.FIELD(
+        "shape",
+        DataTypes
+          .ROW(
+            DataTypes.FIELD("Rect", DataTypes.ROW(DataTypes.FIELD("width", INT().notNull), DataTypes.FIELD("height", INT().notNull))),
+            DataTypes.FIELD("Circle", DataTypes.ROW(DataTypes.FIELD("radius", DataTypes.DOUBLE().notNull)))
+          )
+          .notNull
+      )
+    )
+    val logicalType                  = customType.getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rowData = toRowData.to(Record(1, Circle(2.5)))
+
+    val union = rowData.getRow(1, 2)
+    union.isNullAt(0) shouldBe true // Rect
+    union.getRow(1, 1).getDouble(0) shouldBe 2.5 // Circle
+
+    FromRowData.apply[Record](logicalType).from(rowData) shouldBe Record(1, Circle(2.5))
+    FromRowData.apply[Record](logicalType).from(toRowData.to(Record(2, Rect(3, 4)))) shouldBe Record(2, Rect(3, 4))
+  }
+
+  it should "encode annotated enum cases with the annotated name, so the decoder finds them again" in {
+    sealed trait Status
+    @TableName("ACTIVE") case object Active extends Status
+    case object Inactive                    extends Status
+    case class Record(status: Status)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    toRowData.to(Record(Active)).getString(0).toString shouldBe "ACTIVE"
+    toRowData.to(Record(Inactive)).getString(0).toString shouldBe "Inactive"
+    FromRowData.apply[Record](logicalType).from(toRowData.to(Record(Active))) shouldBe Record(Active)
+  }
+
   it should "convert sealed traits" in {
     sealed trait TestSealedTrait
     case class Test1(a: String) extends TestSealedTrait
@@ -305,12 +492,73 @@ class EncoderTest extends UnitSpec:
     rowData.getString(0).toString shouldBe "SomeObject"
   }
 
+  it should "write columns in schema order, matching parameters by name" in {
+    // parameter order: Int, String, String, Boolean
+    case class User(id: Int, firstName: String, lastName: String, active: Boolean)
+    val user = User(id = 42, firstName = "Alice", lastName = "Smith", active = true)
+
+    // schema column order: Boolean, String, Int, String - every column sits at a different position than its
+    // parameter, and the types at each position differ, so the encoder can only succeed by matching names
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("active", DataTypes.BOOLEAN().notNull), // position 0, parameter 3
+      DataTypes.FIELD("lastName", STRING().notNull),          // position 1, parameter 2
+      DataTypes.FIELD("id", INT().notNull),                   // position 2, parameter 0
+      DataTypes.FIELD("firstName", STRING().notNull)          // position 3, parameter 1
+    )
+    val toRowData: ToRowData[User] = ToRowData.apply[User](customType.getLogicalType)
+
+    val rowData = toRowData.to(user)
+
+    rowData.getBoolean(0) shouldBe true
+    rowData.getString(1).toString shouldBe "Smith"
+    rowData.getInt(2) shouldBe 42
+    rowData.getString(3).toString shouldBe "Alice"
+  }
+
+  it should "carry the requested RowKind" in {
+    case class Record(id: Int)
+    val record = Record(42)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    toRowData.to(record).getRowKind shouldBe RowKind.INSERT
+    toRowData.to(record, RowKind.UPDATE_BEFORE).getRowKind shouldBe RowKind.UPDATE_BEFORE
+    toRowData.to(record, RowKind.UPDATE_AFTER).getRowKind shouldBe RowKind.UPDATE_AFTER
+    toRowData.to(record, RowKind.DELETE).getRowKind shouldBe RowKind.DELETE
+
+    // the kind does not change the payload
+    toRowData.to(record, RowKind.DELETE).getInt(0) shouldBe 42
+  }
+
   it should "convert Byte and Short primitives" in {
     val byteEncoder  = Encoder[Byte]
     val shortEncoder = Encoder[Short]
 
-    byteEncoder.encode(null)(42.toByte) shouldBe java.lang.Byte.valueOf(42.toByte)
-    shortEncoder.encode(null)(100.toShort) shouldBe java.lang.Short.valueOf(100.toShort)
+    byteEncoder.encode(new TinyIntType())(42.toByte) shouldBe java.lang.Byte.valueOf(42.toByte)
+    shortEncoder.encode(new SmallIntType())(100.toShort) shouldBe java.lang.Short.valueOf(100.toShort)
+  }
+
+  it should "widen Byte and Short to the INT column of the derived schema" in {
+    case class SmallPrimitives(b: Byte, s: Short)
+    val smallPrimitives = SmallPrimitives(1, 2)
+
+    val logicalType                           = FlinkDataType[SmallPrimitives].getLogicalType
+    val toRowData: ToRowData[SmallPrimitives] = ToRowData.apply[SmallPrimitives](logicalType)
+
+    val rowData = toRowData.to(smallPrimitives)
+
+    rowData.getInt(0) shouldBe 1
+    rowData.getInt(1) shouldBe 2
+
+    // the serializer only accepts the column's java type
+    val serializer = new RowDataSerializer(logicalType.asInstanceOf[RowType])
+    val out        = new DataOutputSerializer(64)
+    serializer.serialize(rowData, out)
+    val deserialized: RowData = serializer.deserialize(new DataInputDeserializer(out.getCopyOfBuffer))
+
+    FromRowData.apply[SmallPrimitives](logicalType).from(deserialized) shouldBe smallPrimitives
+
   }
 
   it should "convert byte iterables" in {
@@ -328,7 +576,8 @@ class EncoderTest extends UnitSpec:
   }
 
   it should "convert Map with MULTISET type" in {
-    case class WithMultiset(counts: Map[Int, String])
+    // MULTISET<STRING> is a map from element to count
+    case class WithMultiset(counts: Map[String, Int])
 
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("counts", MULTISET(STRING().notNull).notNull)
@@ -336,10 +585,18 @@ class EncoderTest extends UnitSpec:
     val logicalType                        = customType.getLogicalType
     val toRowData: ToRowData[WithMultiset] = ToRowData.apply[WithMultiset](logicalType)
 
-    val rowData = toRowData.to(WithMultiset(Map(1 -> "a")))
+    val rowData = toRowData.to(WithMultiset(Map("a" -> 2)))
 
-    rowData.getMap(0).keyArray().getInt(0) shouldBe 1
-    rowData.getMap(0).valueArray().getString(0).toString shouldBe "a"
+    rowData.getMap(0).keyArray().getString(0).toString shouldBe "a"
+    rowData.getMap(0).valueArray().getInt(0) shouldBe 2
+
+    // flink's own serializer for MULTISET expects exactly this layout
+    val serializer = new RowDataSerializer(logicalType.asInstanceOf[RowType])
+    val out        = new DataOutputSerializer(64)
+    serializer.serialize(rowData, out)
+    val deserialized: RowData = serializer.deserialize(new DataInputDeserializer(out.getCopyOfBuffer))
+
+    FromRowData.apply[WithMultiset](logicalType).from(deserialized) shouldBe WithMultiset(Map("a" -> 2))
   }
 
   it should "support Encoder.identity" in {
@@ -351,9 +608,48 @@ class EncoderTest extends UnitSpec:
   it should "support Encoder.contramap" in {
     val intEncoder = Encoder[Int]
     val longToInt  = intEncoder.contramap[Long](_.toInt)
-    val result     = longToInt.encode(null)(42L)
+    val result     = longToInt.encode(new IntType())(42L)
     result shouldBe Integer.valueOf(42)
   }
+
+  it should "truncate timestamps to milliseconds for columns with precision <= 3" in {
+    case class Ts(instant: Instant)
+    val ts = Ts(Instant.ofEpochSecond(1, 123456789))
+
+    val millisType: DataType = DataTypes.ROW(DataTypes.FIELD("instant", DataTypes.TIMESTAMP(3).notNull))
+    val nanosType: DataType  = DataTypes.ROW(DataTypes.FIELD("instant", DataTypes.TIMESTAMP(9).notNull))
+
+    val millisRow = ToRowData.apply[Ts](millisType.getLogicalType).to(ts)
+    val nanosRow  = ToRowData.apply[Ts](nanosType.getLogicalType).to(ts)
+
+    // the serializer for TIMESTAMP(3) asserts that no nano-of-millisecond part is present
+    millisRow.getTimestamp(0, 3).getNanoOfMillisecond shouldBe 0
+    millisRow.getTimestamp(0, 3).toInstant shouldBe Instant.ofEpochSecond(1, 123000000)
+    nanosRow.getTimestamp(0, 9).toInstant shouldBe ts.instant
+  }
+
+  it should "convert Float and Double to the floating point type of the column" in {
+    val floatEncoder  = Encoder[Float]
+    val doubleEncoder = Encoder[Double]
+
+    floatEncoder.encode(new FloatType())(1.5f) shouldBe java.lang.Float.valueOf(1.5f)
+    floatEncoder.encode(new DoubleType())(1.5f) shouldBe java.lang.Double.valueOf(1.5d)
+    doubleEncoder.encode(new DoubleType())(1.5d) shouldBe java.lang.Double.valueOf(1.5d)
+    doubleEncoder.encode(new FloatType())(1.5d) shouldBe java.lang.Float.valueOf(1.5f)
+    an[UnsupportedOperationException] should be thrownBy doubleEncoder.encode(new IntType())
+  }
+
+  it should "convert Int and Long to the integer type of the column" in {
+    val intEncoder  = Encoder[Int]
+    val longEncoder = Encoder[Long]
+
+    intEncoder.encode(new BigIntType())(42) shouldBe java.lang.Long.valueOf(42L)
+    intEncoder.encode(new SmallIntType())(70000) shouldBe java.lang.Short.valueOf(70000.toShort) // wraps around
+    longEncoder.encode(new IntType())(42L) shouldBe Integer.valueOf(42)
+    longEncoder.encode(new IntType())(1L << 33 | 5) shouldBe Integer.valueOf(5) // wraps around
+    an[UnsupportedOperationException] should be thrownBy longEncoder.encode(new TimestampType(3))
+  }
+
 
   it should "throw on unsupported UUID schema type" in {
     import org.apache.flink.table.types.logical.IntType

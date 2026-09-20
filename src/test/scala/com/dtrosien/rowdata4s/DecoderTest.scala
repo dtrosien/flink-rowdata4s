@@ -233,6 +233,24 @@ class DecoderTest extends UnitSpec:
     tup.tuple shouldBe ("A", "3")
   }
 
+  it should "convert java.util.Date like an Instant" in {
+    case class WithUtilDate(d: java.util.Date)
+    val instant = Instant.parse("2026-09-20T10:15:30.123Z")
+
+    val logicalType = FlinkDataType[WithUtilDate].getLogicalType // TIMESTAMP_LTZ(3)
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, TimestampData.fromInstant(instant))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[WithUtilDate](logicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.d shouldBe java.util.Date.from(instant)
+  }
+
   it should "convert temporal types" in {
     case class TimeAndDates(
         localDateTime: LocalDateTime,
@@ -244,21 +262,21 @@ class DecoderTest extends UnitSpec:
         localTime: LocalTime
     )
 
-    val testInstant = Instant.now
-    val testDate    = LocalDate.now
-    val testOffsetDateTime =
-      OffsetDateTime.ofInstant(testInstant.truncatedTo(ChronoUnit.MILLIS), ZoneOffset.UTC) // truncate to millis
+    val testInstant       = Instant.now
+    val testDate          = LocalDate.now
+    val testLocalDateTime = LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
 
+    // the derived schema: TIMESTAMP(6) for wall-clock values, TIMESTAMP_LTZ(6) for instants, TIME(3), DATE
     val logicalType = FlinkDataType[TimeAndDates].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 7)
-      row.setField(0, TimestampData.fromInstant(testInstant).getMillisecond)
+      row.setField(0, TimestampData.fromLocalDateTime(testLocalDateTime))
       row.setField(1, Int.box(testDate.toEpochDay.toInt))
       row.setField(2, TimestampData.fromInstant(testInstant))
       row.setField(3, LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay.toInt)
       row.setField(4, TimestampData.fromInstant(testInstant))
-      row.setField(5, StringData.fromString(testOffsetDateTime.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)))
+      row.setField(5, TimestampData.fromInstant(testInstant))
       row.setField(6, Int.box((LocalTime.of(10, 30).toNanoOfDay / 1_000_000).toInt))
       row
     }
@@ -267,14 +285,12 @@ class DecoderTest extends UnitSpec:
 
     val timesAndDates = fromRowData.from(rowData)
 
-    timesAndDates.localDateTime shouldBe LocalDateTime
-      .ofInstant(testInstant, ZoneOffset.UTC)
-      .truncatedTo(ChronoUnit.MILLIS)
+    timesAndDates.localDateTime shouldBe testLocalDateTime
     timesAndDates.date shouldBe Date.valueOf(testDate)
     timesAndDates.instant shouldBe testInstant
     timesAndDates.localDate shouldBe testDate
     timesAndDates.timestamp shouldBe Timestamp.from(testInstant)
-    timesAndDates.offsetDateTime.toInstant shouldBe testOffsetDateTime.toInstant // use of instant to have stable tests
+    timesAndDates.offsetDateTime shouldBe OffsetDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     timesAndDates.localTime shouldBe LocalTime.of(10, 30)
 
   }
@@ -282,7 +298,7 @@ class DecoderTest extends UnitSpec:
   it should "convert BigInt to Instant" in {
     case class Test(id: Int, inst: Instant)
 
-    // required because avro derivation uses timestampdata for inst
+    // custom schema: the derived schema would use TIMESTAMP_LTZ for the Instant
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("id", INT()),
       DataTypes.FIELD("inst", BIGINT())
@@ -400,6 +416,44 @@ class DecoderTest extends UnitSpec:
     test.st shouldBe B("ABC", 123)
   }
 
+  it should "tolerate a union field without subtype unless it is the active one" in {
+    // two subtypes, a sealed trait with a single subtype is encoded as that subtype and not as a union ROW
+    sealed trait Shape
+    case class Circle(radius: Double)        extends Shape
+    case class Rect(width: Int, height: Int) extends Shape
+    case class Record(shape: Shape)
+
+    // the table has a variant the Scala type does not know
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD(
+        "shape",
+        DataTypes
+          .ROW(
+            DataTypes.FIELD("Circle", DataTypes.ROW(DataTypes.FIELD("radius", DataTypes.DOUBLE().notNull))),
+            DataTypes.FIELD("Rect", DataTypes.ROW(DataTypes.FIELD("width", INT().notNull), DataTypes.FIELD("height", INT().notNull))),
+            DataTypes.FIELD("Square", DataTypes.ROW(DataTypes.FIELD("side", INT().notNull)))
+          )
+          .notNull
+      )
+    )
+    val fromRowData = FromRowData.apply[Record](customType.getLogicalType)
+
+    val circle: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, GenericRowData.of(GenericRowData.of(Double.box(2.5)), null, null))
+      row
+    }
+    val square: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, GenericRowData.of(null, null, GenericRowData.of(Int.box(3))))
+      row
+    }
+
+    fromRowData.from(circle) shouldBe Record(Circle(2.5))
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(square)
+    ex.getCause.getMessage should include("Square")
+  }
+
   it should "convert Byte and Short primitives" in {
     case class SmallPrimitives(b: Byte, s: Short)
 
@@ -417,6 +471,87 @@ class DecoderTest extends UnitSpec:
 
     result.b shouldBe 1.toByte
     result.s shouldBe 2.toShort
+  }
+
+  it should "throw on null for Boolean and Byte instead of returning false and 0" in {
+    case class NotOptional(bool: Boolean, byte: Byte)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bool", DataTypes.BOOLEAN().nullable),
+      DataTypes.FIELD("byte", DataTypes.INT().nullable)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, null)
+      row.setField(1, null)
+      row
+    }
+
+    val fromRowData = FromRowData.apply[NotOptional](customType.getLogicalType)
+
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(rowData)
+    ex.getCause shouldBe an[UnsupportedOperationException]
+  }
+
+  it should "name the field and the column type when a field cannot be decoded" in {
+    case class IdName(id: Int, name: String)
+
+    // name is declared as INT, so the String decoder fails on the Integer value
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", INT().notNull),
+      DataTypes.FIELD("name", INT().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(1))
+      row.setField(1, Int.box(5))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[IdName](customType.getLogicalType)
+
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(rowData)
+    ex.getMessage should (include("'name'") and include("INT"))
+    ex.getCause shouldBe an[UnsupportedOperationException]
+  }
+
+  it should "name the field when the column value does not match the schema" in {
+    case class IdName(id: Int, name: String)
+
+    val logicalType = FlinkDataType[IdName].getLogicalType
+
+    // the name column holds an Integer although the schema says STRING; the getter itself fails
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(1))
+      row.setField(1, Int.box(5))
+      row
+    }
+
+    val ex = the[RowDataDecodingException] thrownBy FromRowData.apply[IdName](logicalType).from(rowData)
+    ex.getMessage should include("'name'")
+  }
+
+  it should "report unknown enum values with the valid names" in {
+    enum Enum {
+      case ABC, CBA
+    }
+
+    case class Test(en: Enum)
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, StringData.fromString("XYZ"))
+      row
+    }
+
+    val logicalType = FlinkDataType[Test].getLogicalType
+    val fromRowData = FromRowData.apply[Test](logicalType)
+
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(rowData)
+    ex.getCause.getMessage should (include("XYZ") and include("ABC") and include("CBA"))
   }
 
   it should "convert byte iterables" in {
@@ -499,6 +634,88 @@ class DecoderTest extends UnitSpec:
     result.name shouldBe "fallback"
   }
 
+  it should "match columns to parameters by name, not by position" in {
+    // parameter order: Int, String, String, Boolean
+    case class User(id: Int, firstName: String, lastName: String, active: Boolean)
+
+    // schema column order: Boolean, String, Int, String - every column sits at a different position than its
+    // parameter, and the types at each position differ, so the decoder can only succeed by matching names.
+    // firstName and lastName share a type; a positional decoder would swap those two silently instead of failing.
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("active", DataTypes.BOOLEAN().notNull), // position 0, parameter 3
+      DataTypes.FIELD("lastName", STRING().notNull),          // position 1, parameter 2
+      DataTypes.FIELD("id", INT().notNull),                   // position 2, parameter 0
+      DataTypes.FIELD("firstName", STRING().notNull)          // position 3, parameter 1
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 4)
+      row.setField(0, Boolean.box(true))
+      row.setField(1, StringData.fromString("Smith"))
+      row.setField(2, Int.box(42))
+      row.setField(3, StringData.fromString("Alice"))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[User](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result shouldBe User(id = 42, firstName = "Alice", lastName = "Smith", active = true)
+  }
+
+  it should "use the default value or None for parameters missing from the schema" in {
+    case class WithDefault(id: Int, name: String = "fallback", extra: Option[Int])
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", INT().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, Int.box(7))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[WithDefault](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result shouldBe WithDefault(7, "fallback", None)
+  }
+
+  it should "throw when creating the FromRowData if a parameter without default has no column in the schema" in {
+    case class IdName(id: String, name: String)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("name", STRING().notNull)
+    )
+
+    val ex = the[IllegalArgumentException] thrownBy FromRowData.apply[IdName](customType.getLogicalType)
+    ex.getMessage should include("id")
+  }
+
+  it should "ignore schema columns without a parameter" in {
+    case class IdName(id: String, name: String)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", STRING().notNull),
+      DataTypes.FIELD("unused", INT().notNull),
+      DataTypes.FIELD("name", STRING().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 3)
+      row.setField(0, StringData.fromString("u1"))
+      row.setField(1, Int.box(1))
+      row.setField(2, StringData.fromString("Alice"))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[IdName](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result shouldBe IdName("u1", "Alice")
+  }
+
   it should "support Decoder.map" in {
     val intDecoder    = Decoder[Int]
     val stringDecoder = intDecoder.map(_.toString)
@@ -571,10 +788,11 @@ class DecoderTest extends UnitSpec:
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("counts", DataTypes.MULTISET(STRING().notNull).notNull)
     )
-    case class WithMultiset(counts: Map[Int, String])
+    // MULTISET<STRING> is a map from element to count
+    case class WithMultiset(counts: Map[String, Int])
 
     val keyRow = GenericMapData(
-      Map(Int.box(1) -> StringData.fromString("a")).asJava
+      Map(StringData.fromString("a") -> Int.box(2)).asJava
     )
 
     val rowData: RowData = {
@@ -586,7 +804,7 @@ class DecoderTest extends UnitSpec:
     val fromRowData = FromRowData.apply[WithMultiset](customType.getLogicalType)
     val result      = fromRowData.from(rowData)
 
-    result.counts shouldBe Map(1 -> "a")
+    result.counts shouldBe Map("a" -> 2)
   }
 
   it should "decode Map from java.util.Map input" in {

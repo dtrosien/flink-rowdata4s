@@ -6,13 +6,14 @@ import com.dtrosien.rowdata4s.datatype.CaseClassShape.Object
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.types.DataType
+import org.apache.flink.table.types.logical.LogicalTypeRoot
 
 import java.nio.ByteBuffer
 import java.sql.Timestamp
 import java.time.*
 import java.util.{Date, UUID}
 
-/** A [[DataTypeFor]] generates an Avro Schema for a Scala or Java type.
+/** A [[DataTypeFor]] generates a Flink [[DataType]] for a Scala or Java type.
   *
   * For example, a DataTypeFor[String] could return a datatype of type DataType.STRING, and a DataTypeFor[Int] could
   * return a datatype of type DataType.INT
@@ -72,13 +73,12 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
 
   def join[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] =
     DatatypeShape.of(ctx) match {
-      case CaseClassShape.Record    => Records.dataType(ctx)
-      case CaseClassShape.ValueType => ???
-      case Object                   => Objects.dataType(ctx)
+      case CaseClassShape.Record => Records.dataType(ctx)
+      case CaseClassShape.Object => Objects.dataType(ctx)
     }
 
   override def split[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] =
-    DatatypeShape.of[T](ctx) match {
+    DatatypeShape.of(ctx)(_.isInstanceOf[ObjectDataTypeFor[?]]) match {
       case SealedTraitShape.Enum => Enums.dataType(ctx)
       case SealedTraitShape.TypeUnion =>
         ctx.subtypes match {
@@ -87,22 +87,22 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
         }
     }
 
+// value classes (AnyVal) have no shape: Scala 3 provides no Mirror for them, so derivation fails at compile time
 enum CaseClassShape:
-  case ValueType, Record, Object
+  case Record, Object
 
 enum SealedTraitShape:
   case TypeUnion, Enum
 
 object DatatypeShape:
 
-  def of[T](ctx: SealedTrait[?, T]): SealedTraitShape = {
-    val allSubtypesAreObjects = ctx.subtypes.forall(_.isObject)
-    if ctx.isEnum || allSubtypesAreObjects then SealedTraitShape.Enum else SealedTraitShape.TypeUnion
+  def of[F[_], T](ctx: SealedTrait[F, T])(isObjectTypeclass: Any => Boolean): SealedTraitShape = {
+    val allSubtypesAreObjects = ctx.subtypes.forall(st => st.isObject || isObjectTypeclass(st.typeclass))
+    if allSubtypesAreObjects then SealedTraitShape.Enum else SealedTraitShape.TypeUnion
   }
 
   def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape = {
-    if ctx.isValueClass then CaseClassShape.ValueType
-    else if ctx.isObject then CaseClassShape.Object
+    if ctx.isObject then CaseClassShape.Object
     else if ctx.parameters.isEmpty then CaseClassShape.Object // required to be able to convert simple enums to strings
     else CaseClassShape.Record
   }
@@ -112,11 +112,11 @@ object DatatypeShape:
 // ==============================================
 
 object Objects {
-  def dataType[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] = {
-    new DataTypeFor[T] {
-      override def dataType: DataType = DataTypes.STRING.notNull
-    }
-  }
+  def dataType[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] = new ObjectDataTypeFor[T]
+}
+
+class ObjectDataTypeFor[T] extends DataTypeFor[T] {
+  override def dataType: DataType = DataTypes.STRING.notNull
 }
 
 // ==============================================
@@ -162,8 +162,9 @@ object Records:
       val fieldAnnos = Annotations(param.annotations)
       if fieldAnnos.transient then None
       else {
-        val name = fieldAnnos.name.getOrElse(param.label)
-        Some(DataTypes.FIELD(name, param.typeclass.dataType))
+        val name     = fieldAnnos.name.getOrElse(param.label)
+        val dataType = FieldAnnotations.applyTo(param.typeclass.dataType, fieldAnnos, s"${ctx.typeInfo.full}.${param.label}")
+        Some(fieldAnnos.comment.fold(DataTypes.FIELD(name, dataType))(DataTypes.FIELD(name, dataType, _)))
       }
     }
 
@@ -171,6 +172,49 @@ object Records:
 
     new DataTypeFor[T] {
       override def dataType: DataType = record
+    }
+  }
+
+/** Applies the field annotations that change the derived column type. The annotated type keeps the nullability of
+  * the derived one, so `Option` fields stay nullable.
+  */
+object FieldAnnotations:
+
+  def applyTo(derived: DataType, annos: Annotations, field: String): DataType = {
+    val root = derived.getLogicalType.getTypeRoot
+
+    def withNullability(dataType: DataType): DataType =
+      if derived.getLogicalType.isNullable then dataType.nullable else dataType.notNull
+
+    val withDecimal = annos.decimal.fold(derived) { d =>
+      require(root == LogicalTypeRoot.DECIMAL, s"@TableDecimal on $field, which does not derive to DECIMAL but to $derived")
+      withNullability(DataTypes.DECIMAL(d.precision, d.scale))
+    }
+
+    val withTimestamp = annos.timestampPrecision.fold(withDecimal) { precision =>
+      root match
+        case LogicalTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE   => withNullability(DataTypes.TIMESTAMP(precision))
+        case LogicalTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE => withNullability(DataTypes.TIMESTAMP_LTZ(precision))
+        case _ =>
+          throw new IllegalArgumentException(
+            s"@TableTimestampPrecision on $field, which does not derive to a TIMESTAMP but to $derived"
+          )
+    }
+
+    def requireString(annotation: String): Unit =
+      require(
+        root == LogicalTypeRoot.VARCHAR || root == LogicalTypeRoot.CHAR,
+        s"$annotation on $field, which does not derive to STRING but to $derived"
+      )
+
+    val withVarchar = annos.varchar.fold(withTimestamp) { length =>
+      requireString("@TableVarchar")
+      withNullability(DataTypes.VARCHAR(length))
+    }
+
+    annos.char.fold(withVarchar) { length =>
+      requireString("@TableChar")
+      withNullability(DataTypes.CHAR(length))
     }
   }
 
@@ -267,24 +311,39 @@ trait StringSchemas:
 // Temporal   ===================================
 // ==============================================
 
+/** Precision of derived TIMESTAMP and TIMESTAMP_LTZ columns. Flink's default is 6 (microseconds)
+ *  Provide your own given to change it, e.g. 3 for Flink's compact millisecond representation.
+  */
+case class TimestampPrecision(precision: Int)
+
+object TimestampPrecision {
+  given default: TimestampPrecision = TimestampPrecision(6)
+}
+
+/** Temporal types map to the Flink type whose conversion class they are: instants (anything that denotes a point in
+  * time) to TIMESTAMP_LTZ, wall-clock values to TIMESTAMP, and TIME to precision 3 because Flink stores it as
+  * milliseconds.
+  */
 trait TemporalSchemas:
-  given InstantSchemaFor: DataTypeFor[Instant] =
-    DataTypeFor(DataTypes.TIMESTAMP(3).notNull)
+  given InstantSchemaFor(using tp: TimestampPrecision): DataTypeFor[Instant] =
+    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(tp.precision).notNull)
   // java.util.Date behaves like an instant
-  given UtilDateSchemaFor: DataTypeFor[java.util.Date] =
-    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull)
+  given UtilDateSchemaFor(using tp: TimestampPrecision): DataTypeFor[java.util.Date] =
+    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(tp.precision).notNull)
+  // OffsetDateTime is an instant as well, the offset itself is not kept
+  given OffsetDateTimeSchemaFor(using tp: TimestampPrecision): DataTypeFor[OffsetDateTime] =
+    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(tp.precision).notNull)
+  given LocalDateTimeSchemaFor(using tp: TimestampPrecision): DataTypeFor[LocalDateTime] =
+    DataTypeFor(DataTypes.TIMESTAMP(tp.precision).notNull)
+  // java.sql.Timestamp is Flink's conversion class for TIMESTAMP
+  given TimestampSchemaFor(using tp: TimestampPrecision): DataTypeFor[Timestamp] =
+    DataTypeFor(DataTypes.TIMESTAMP(tp.precision).notNull)
   given SqlDateSchemaFor: DataTypeFor[java.sql.Date] =
     DataTypeFor(DataTypes.DATE.notNull)
   given LocalDateSchemaFor: DataTypeFor[LocalDate] =
     DataTypeFor(DataTypes.DATE.notNull)
-  given LocalDateTimeSchemaFor: DataTypeFor[LocalDateTime] =
-    DataTypeFor(DataTypes.BIGINT.notNull)
-  given OffsetDateTimeSchemaFor: DataTypeFor[OffsetDateTime] =
-    DataTypeFor(DataTypes.STRING.notNull)
   given LocalTimeSchemaFor: DataTypeFor[LocalTime] =
-    DataTypeFor(DataTypes.TIME(6).notNull)
-  given TimestampSchemaFor: DataTypeFor[Timestamp] =
-    DataTypeFor(DataTypes.TIMESTAMP(3).notNull)
+    DataTypeFor(DataTypes.TIME(3).notNull)
 
 // ==============================================
 // Tuples   =====================================
