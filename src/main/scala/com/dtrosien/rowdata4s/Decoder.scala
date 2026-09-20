@@ -27,8 +27,12 @@ trait FromRowData[T <: Product] extends Serializable {
 object FromRowData {
   def apply[T <: Product](
       logicalType: LogicalType
-  )(using decoder: Decoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): FromRowData[T] = new FromRowData[T] {
-    override def from(rowData: RowData): T = decoder.decode(logicalType).apply(rowData)
+  )(using decoder: Decoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): FromRowData[T] = {
+    // resolve the schema once, not on every record
+    val decode: Any => T = decoder.decode(logicalType)
+    new FromRowData[T] {
+      override def from(rowData: RowData): T = decode(rowData)
+    }
   }
 }
 
@@ -40,8 +44,9 @@ trait Decoder[T] extends Serializable {
   def decode(logicalType: LogicalType): Any => T
 
   final def map[U](f: T => U): Decoder[U] = new Decoder[U] {
-    override def decode(logicalType: LogicalType): Any => U = { input =>
-      f(self.decode(logicalType).apply(input))
+    override def decode(logicalType: LogicalType): Any => U = {
+      val decodeT = self.decode(logicalType)
+      input => f(decodeT(input))
     }
   }
 }
@@ -181,7 +186,7 @@ class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
         values(i) = decoders(i).decode(rowData)
         i += 1
       }
-      ctx.rawConstruct(values.toIndexedSeq)
+      ctx.rawConstruct(values)
     case _ =>
       throw new UnsupportedOperationException(s"This decoder can only handle RowData [was ${value.getClass}]")
   }
@@ -193,7 +198,7 @@ class FieldDecoder[T](
     param: magnolia1.CaseClass.Param[Decoder, T],
     logicalType: LogicalType,
     fieldGetter: RowData.FieldGetter
-) {
+) extends Serializable {
   private val decoder = param.typeclass.asInstanceOf[Decoder[T]].decode(logicalType)
 
   def decode(rowData: RowData): Any = {
@@ -364,9 +369,9 @@ class ArrayDecoder[T: ClassTag](decoder: Decoder[T]) extends Decoder[Array[T]]:
     )
     val elementType = logicalType.asInstanceOf[ArrayType].getElementType
     val decodeT     = decoder.decode(elementType)
+    val elementGetter = ArrayData.createElementGetter(elementType)
     {
       case arrayData: ArrayData =>
-        val elementGetter = ArrayData.createElementGetter(elementType)
         (0 until arrayData.size()).map(i => decodeT(elementGetter.getElementOrNull(arrayData, i))).toArray
       case array: Array[?]               => array.map(decodeT)
       case list: java.util.Collection[?] => list.asScala.map(decodeT).toArray
@@ -394,9 +399,9 @@ trait CollectionDecoders:
         )
         val elementType = logicalType.asInstanceOf[ArrayType].getElementType
         val decodeT     = decoder.decode(elementType)
+        val elementGetter = ArrayData.createElementGetter(elementType)
         {
           case arrayData: ArrayData =>
-            val elementGetter = ArrayData.createElementGetter(elementType)
             build((0 until arrayData.size()).map(i => decodeT(elementGetter.getElementOrNull(arrayData, i))))
           case list: java.util.Collection[?] => build(list.asScala.map(decodeT))
           case list: Iterable[?]             => build(list.map(decodeT))
@@ -420,10 +425,10 @@ class MapDecoder[K, V](decoderK: Decoder[K], decoderV: Decoder[V]) extends Decod
         (keyType, valueType, decoderK.decode(keyType), decoderV.decode(valueType))
       case _ => throw new UnsupportedOperationException(s"Unsupported type for Map: $logicalType")
 
+    val keyGetter   = ArrayData.createElementGetter(keyType)
+    val valueGetter = ArrayData.createElementGetter(valueType)
     {
       case mapData: MapData =>
-        val keyGetter   = ArrayData.createElementGetter(keyType)
-        val valueGetter = ArrayData.createElementGetter(valueType)
         (0 until mapData.size()).map { i =>
           val k = decodeK(keyGetter.getElementOrNull(mapData.keyArray(), i))
           val v = decodeV(valueGetter.getElementOrNull(mapData.valueArray(), i))

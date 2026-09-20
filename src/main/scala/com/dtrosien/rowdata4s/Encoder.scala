@@ -27,7 +27,10 @@ object ToRowData {
   def apply[T <: Product](
       logicalType: LogicalType
   )(using encoder: Encoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): ToRowData[T] = new ToRowData[T] {
-    def to(t: T): RowData = encoder.encode(logicalType).apply(t) match {
+    // resolve the schema once, not on every record
+    private val encode: T => Any = encoder.encode(logicalType)
+
+    def to(t: T): RowData = encode(t) match {
       case rowData: RowData => rowData
       case output =>
         val clazz = output.getClass
@@ -48,7 +51,10 @@ trait Encoder[T] extends Serializable {
   /** Returns an [[Encoder[U]] by applying a function that maps a U to an T, before encoding as an T using this encoder.
     */
   final def contramap[U](f: U => T): Encoder[U] = new Encoder[U] {
-    override def encode(logicalType: LogicalType): U => Any = { u => self.encode(logicalType).apply(f(u)) }
+    override def encode(logicalType: LogicalType): U => Any = {
+      val encodeT = self.encode(logicalType)
+      u => encodeT(f(u))
+    }
   }
 }
 
