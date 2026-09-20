@@ -483,6 +483,8 @@ object ByteArrayEncoder extends Encoder[Array[Byte]]:
 trait TemporalEncoders:
   given Encoder[Instant]                     = InstantEncoder
   given TimestampEncoder: Encoder[Timestamp] = InstantEncoder.contramap[Timestamp](_.toInstant)
+  // java.util.Date behaves like an instant (DataTypeFor maps it to TIMESTAMP_LTZ)
+  given UtilDateEncoder: Encoder[java.util.Date] = InstantEncoder.contramap[java.util.Date](_.toInstant)
 
   given LocalDateEncoder: Encoder[LocalDate] = IntEncoder.contramap[LocalDate](_.toEpochDay.toInt)
   given Encoder[LocalTime]                   = LocalTimeEncoder

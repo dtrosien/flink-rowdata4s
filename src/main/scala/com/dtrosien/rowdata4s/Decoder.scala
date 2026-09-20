@@ -535,6 +535,8 @@ object ByteBufferDecoder extends Decoder[ByteBuffer]:
 
 trait TemporalDecoders:
   given TimestampDecoder: Decoder[Timestamp]         = InstantDecoder.map[Timestamp](Timestamp.from)
+  // java.util.Date behaves like an instant (DataTypeFor maps it to TIMESTAMP_LTZ)
+  given UtilDateDecoder: Decoder[java.util.Date]     = InstantDecoder.map[java.util.Date](java.util.Date.from)
   given DateDecoder: Decoder[Date]                   = LocalDateDecoder.map[Date](Date.valueOf)
   given LocalDateTimeDecoder: Decoder[LocalDateTime] = InstantDecoder.map(LocalDateTime.ofInstant(_, ZoneOffset.UTC))
   given LocalTimeDecoder: Decoder[LocalTime] = new Decoder[LocalTime] {

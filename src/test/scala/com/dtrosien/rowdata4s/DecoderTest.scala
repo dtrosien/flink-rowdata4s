@@ -233,6 +233,24 @@ class DecoderTest extends UnitSpec:
     tup.tuple shouldBe ("A", "3")
   }
 
+  it should "convert java.util.Date like an Instant" in {
+    case class WithUtilDate(d: java.util.Date)
+    val instant = Instant.parse("2026-09-20T10:15:30.123Z")
+
+    val logicalType = FlinkDataType[WithUtilDate].getLogicalType // TIMESTAMP_LTZ(3)
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, TimestampData.fromInstant(instant))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[WithUtilDate](logicalType)
+    val result      = fromRowData.from(rowData)
+
+    result.d shouldBe java.util.Date.from(instant)
+  }
+
   it should "convert temporal types" in {
     case class TimeAndDates(
         localDateTime: LocalDateTime,

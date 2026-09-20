@@ -233,6 +233,18 @@ class EncoderTest extends UnitSpec:
     rowData.getRow(0, 2).getString(0).toString shouldBe "3"
   }
 
+  it should "convert java.util.Date like an Instant" in {
+    case class WithUtilDate(d: java.util.Date)
+    val instant = Instant.parse("2026-09-20T10:15:30.123Z")
+
+    val logicalType                        = FlinkDataType[WithUtilDate].getLogicalType // TIMESTAMP_LTZ(3)
+    val toRowData: ToRowData[WithUtilDate] = ToRowData.apply[WithUtilDate](logicalType)
+
+    val rowData = toRowData.to(WithUtilDate(java.util.Date.from(instant)))
+
+    rowData.getTimestamp(0, 3).toInstant shouldBe instant
+  }
+
   it should "convert temporal types" in {
     case class TimeAndDates(
         localDateTime: LocalDateTime,
