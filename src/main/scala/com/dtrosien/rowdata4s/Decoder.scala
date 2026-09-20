@@ -211,12 +211,9 @@ object FieldDecoder {
   ): FieldDecoder[T] = new FieldDecoder[T] {
     private val decoder = param.typeclass.asInstanceOf[Decoder[T]].decode(logicalType)
 
-    def decode(rowData: RowData): Any = tryDecode(fieldGetter.getFieldOrNull(rowData))
-
-    @inline
-    private def tryDecode(value: Any): Any =
+    def decode(rowData: RowData): Any =
       try {
-        decoder.apply(value)
+        decoder.apply(fieldGetter.getFieldOrNull(rowData))
       } catch {
         case NonFatal(ex) =>
           param.default.getOrElse(

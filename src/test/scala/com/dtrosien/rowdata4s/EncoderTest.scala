@@ -90,6 +90,13 @@ class EncoderTest extends UnitSpec:
     stringEncoder.encode(new VarCharType(2))("\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00").toString shouldBe "\uD83D\uDE00\uD83D\uDE00"
   }
 
+  it should "reject a String field on a column that is not CHAR or VARCHAR" in {
+    case class Test(name: String)
+    val customType: DataType = DataTypes.ROW(DataTypes.FIELD("name", INT().notNull))
+
+    an[UnsupportedOperationException] should be thrownBy ToRowData.apply[Test](customType.getLogicalType)
+  }
+
   it should "truncate annotated String fields through the derived schema" in {
     case class Test(@TableVarchar(3) name: String, @TableChar(2) country: String)
 

@@ -338,7 +338,8 @@ object StringEncoder extends Encoder[String]:
     case char: CharType =>
       val length = char.getLength
       string => StringData.fromString(pad(truncate(string, length), length))
-    case _ => string => StringData.fromString(string)
+    case null | _: VarCharType => string => StringData.fromString(string)
+    case _ => throw new UnsupportedOperationException(s"StringEncoder doesn't support schema type ${logicalType.getTypeRoot}")
 
   private def truncate(string: String, length: Int): String =
     if string.codePointCount(0, string.length) <= length then string

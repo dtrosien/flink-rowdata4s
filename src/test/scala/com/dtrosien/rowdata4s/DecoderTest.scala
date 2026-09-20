@@ -517,6 +517,23 @@ class DecoderTest extends UnitSpec:
     ex.getCause shouldBe an[UnsupportedOperationException]
   }
 
+  it should "name the field when the column value does not match the schema" in {
+    case class IdName(id: Int, name: String)
+
+    val logicalType = FlinkDataType[IdName].getLogicalType
+
+    // the name column holds an Integer although the schema says STRING; the getter itself fails
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(1))
+      row.setField(1, Int.box(5))
+      row
+    }
+
+    val ex = the[RowDataDecodingException] thrownBy FromRowData.apply[IdName](logicalType).from(rowData)
+    ex.getMessage should include("'name'")
+  }
+
   it should "report unknown enum values with the valid names" in {
     enum Enum {
       case ABC, CBA
