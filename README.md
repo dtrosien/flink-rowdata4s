@@ -9,11 +9,35 @@ project and modified to work with Flink's `RowData` format instead of Avro.
 
 Credit goes to the original authors of avro4s for the foundation on which this library is built.
 
-Datatype derivation is compatible with Flink’s `AvroSchemaConverter` only for product types (i.e., case classes /
-records).
-Algebraic data types (ADTs) are flattened into a `Row` containing optional fields for each variant. This structural
-encoding is not compatible with `AvroSchemaConverter`, which does not derive a corresponding Avro union schema and
-instead falls back to Kryo serialization for arbitrary objects. Simple enums are treated as Strings inside a Row.
+#### Schema derivation
+
+`FlinkDataType[T]` derives a Flink `DataType` for a case class. Every field maps to the Flink type it is the
+conversion class of:
+
+| Scala type                                        | Flink type                              |
+|---------------------------------------------------|-----------------------------------------|
+| `Int`, `Byte`, `Short`                            | `INT`                                   |
+| `Long`, `Float`, `Double`, `Boolean`              | `BIGINT`, `FLOAT`, `DOUBLE`, `BOOLEAN`  |
+| `String`, `CharSequence`, `UUID`                  | `STRING`                                |
+| `BigDecimal`                                      | `DECIMAL(p, s)` from a `ScalePrecision` given, default `(8, 2)` |
+| `Array[Byte]`, `Seq[Byte]`, `ByteBuffer`          | `BYTES`                                 |
+| `Instant`, `java.util.Date`, `OffsetDateTime`     | `TIMESTAMP_LTZ(p)`                      |
+| `LocalDateTime`, `java.sql.Timestamp`             | `TIMESTAMP(p)`                          |
+| `LocalDate`, `java.sql.Date`                      | `DATE`                                  |
+| `LocalTime`                                       | `TIME(3)` (Flink stores milliseconds)   |
+| `Option[T]`                                       | nullable `T`                            |
+| `Seq`, `List`, `Vector`, `Set`, `Array`           | `ARRAY`                                 |
+| `Map[String, V]`                                  | `MAP<STRING, V>`                        |
+| case class, tuple                                 | `ROW`                                   |
+| enum, sealed trait of case objects                | `STRING`                                |
+| sealed trait                                     | `ROW` with one nullable field per variant |
+
+`p` comes from a `TimestampPrecision` given and defaults to 6, Flink's default and what Iceberg stores; use
+`TimestampPrecision(3)` for Flink's compact millisecond representation. Any mapping can be replaced by putting your
+own `given DataTypeFor[T]` in scope.
+
+Algebraic data types (ADTs) are flattened into a `Row` containing optional fields for each variant; only the field of
+the actual variant is set. Simple enums are treated as Strings.
 
 #### TODO
 

@@ -267,24 +267,39 @@ trait StringSchemas:
 // Temporal   ===================================
 // ==============================================
 
+/** Precision of derived TIMESTAMP and TIMESTAMP_LTZ columns. Flink's default is 6 (microseconds)
+ *  Provide your own given to change it, e.g. 3 for Flink's compact millisecond representation.
+  */
+case class TimestampPrecision(precision: Int)
+
+object TimestampPrecision {
+  given default: TimestampPrecision = TimestampPrecision(6)
+}
+
+/** Temporal types map to the Flink type whose conversion class they are: instants (anything that denotes a point in
+  * time) to TIMESTAMP_LTZ, wall-clock values to TIMESTAMP, and TIME to precision 3 because Flink stores it as
+  * milliseconds.
+  */
 trait TemporalSchemas:
-  given InstantSchemaFor: DataTypeFor[Instant] =
-    DataTypeFor(DataTypes.TIMESTAMP(3).notNull)
+  given InstantSchemaFor(using tp: TimestampPrecision): DataTypeFor[Instant] =
+    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(tp.precision).notNull)
   // java.util.Date behaves like an instant
-  given UtilDateSchemaFor: DataTypeFor[java.util.Date] =
-    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull)
+  given UtilDateSchemaFor(using tp: TimestampPrecision): DataTypeFor[java.util.Date] =
+    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(tp.precision).notNull)
+  // OffsetDateTime is an instant as well, the offset itself is not kept
+  given OffsetDateTimeSchemaFor(using tp: TimestampPrecision): DataTypeFor[OffsetDateTime] =
+    DataTypeFor(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(tp.precision).notNull)
+  given LocalDateTimeSchemaFor(using tp: TimestampPrecision): DataTypeFor[LocalDateTime] =
+    DataTypeFor(DataTypes.TIMESTAMP(tp.precision).notNull)
+  // java.sql.Timestamp is Flink's conversion class for TIMESTAMP
+  given TimestampSchemaFor(using tp: TimestampPrecision): DataTypeFor[Timestamp] =
+    DataTypeFor(DataTypes.TIMESTAMP(tp.precision).notNull)
   given SqlDateSchemaFor: DataTypeFor[java.sql.Date] =
     DataTypeFor(DataTypes.DATE.notNull)
   given LocalDateSchemaFor: DataTypeFor[LocalDate] =
     DataTypeFor(DataTypes.DATE.notNull)
-  given LocalDateTimeSchemaFor: DataTypeFor[LocalDateTime] =
-    DataTypeFor(DataTypes.BIGINT.notNull)
-  given OffsetDateTimeSchemaFor: DataTypeFor[OffsetDateTime] =
-    DataTypeFor(DataTypes.STRING.notNull)
   given LocalTimeSchemaFor: DataTypeFor[LocalTime] =
-    DataTypeFor(DataTypes.TIME(6).notNull)
-  given TimestampSchemaFor: DataTypeFor[Timestamp] =
-    DataTypeFor(DataTypes.TIMESTAMP(3).notNull)
+    DataTypeFor(DataTypes.TIME(3).notNull)
 
 // ==============================================
 // Tuples   =====================================

@@ -10,7 +10,6 @@ import org.apache.flink.table.types.logical.LogicalTypeRoot.*
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
-import java.time.format.DateTimeFormatter
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
@@ -537,8 +536,8 @@ trait TemporalDecoders:
   }
   given LocalDateDecoder: Decoder[LocalDate] = Decoder.IntDecoder.map[LocalDate](i => LocalDate.ofEpochDay(i.toLong))
 
-  given OffsetDateTimeDecoder: Decoder[OffsetDateTime] =
-    StringDecoder.map(OffsetDateTime.parse(_, DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+  // an OffsetDateTime is an instant, it is read back with offset UTC
+  given OffsetDateTimeDecoder: Decoder[OffsetDateTime] = InstantDecoder.map(OffsetDateTime.ofInstant(_, ZoneOffset.UTC))
 
   given InstantDecoder: Decoder[Instant] = new Decoder[Instant] {
     override def decode(logicalType: LogicalType): Any => Instant = {

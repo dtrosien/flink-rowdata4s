@@ -272,28 +272,25 @@ class EncoderTest extends UnitSpec:
     val toRowData: ToRowData[TimeAndDates] = ToRowData.apply[TimeAndDates](logicalType)
     val rowData                            = toRowData.to(timeAndDates)
 
-    // checks
-    rowData.getLong(0) shouldBe testInstant.toEpochMilli
+    // checks: the derived schema uses precision 6 (TIMESTAMP for wall-clock values, TIMESTAMP_LTZ for instants),
+    // which keeps the sub-millisecond part of the values
+    rowData.getTimestamp(0, 6).toLocalDateTime shouldBe LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     rowData.getInt(1) shouldBe LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay
-    // the derived schema is TIMESTAMP(3): sub-millisecond parts are truncated on encode
-    rowData.getTimestamp(2, 8).toInstant shouldBe testInstant.truncatedTo(ChronoUnit.MILLIS)
+    rowData.getTimestamp(2, 6).toInstant shouldBe testInstant
     rowData.getInt(3) shouldBe LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay
 
     // flink timestamp is transformed to LocalDateTimeFirst before getting converted to Timestamp
-    rowData.getTimestamp(4, 8).toTimestamp shouldBe Timestamp.valueOf(
-      LocalDateTime.ofInstant(testInstant.truncatedTo(ChronoUnit.MILLIS), ZoneOffset.UTC)
+    rowData.getTimestamp(4, 6).toTimestamp shouldBe Timestamp.valueOf(
+      LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     )
 
     rowData.getInt(5) shouldBe (LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay / 1_000_000).toInt
 
-    OffsetDateTime
-      .parse(rowData.getString(6).toString, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
-      .toInstant shouldBe OffsetDateTime
-      .ofInstant(testInstant, ZoneOffset.UTC)
-      .toInstant // use of instant to have stable tests
+    rowData.getTimestamp(6, 6).toInstant shouldBe testInstant
 
-    // TIMESTAMP_WITHOUT_TIME_ZONE branch (FlinkDataType uses BIGINT for LocalDateTime by default)
+    // BIGINT columns take LocalDateTime as epoch millis, TIMESTAMP(3) truncates to millis
     val ldt = LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
+    Encoder[LocalDateTime].encode(new BigIntType())(ldt) shouldBe java.lang.Long.valueOf(testInstant.toEpochMilli)
     Encoder[LocalDateTime].encode(new TimestampType(false, 6))(ldt) shouldBe TimestampData.fromLocalDateTime(ldt)
     Encoder[LocalDateTime].encode(new TimestampType(false, 3))(ldt) shouldBe
       TimestampData.fromLocalDateTime(ldt.truncatedTo(ChronoUnit.MILLIS))

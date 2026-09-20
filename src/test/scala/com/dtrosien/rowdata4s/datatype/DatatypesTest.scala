@@ -104,20 +104,38 @@ class DatatypesTest extends UnitSpec:
         offsetDateTime: OffsetDateTime,
         localTime: LocalTime
     )
-    val schema             = AvroSchema[TimeAndDates]
-    val dataTypeFromSchema = AvroSchemaConverter.convertToDataType(schema.toString)
-    val dataType           = FlinkDataType[TimeAndDates]
+    val dataType = FlinkDataType[TimeAndDates]
 
-    dataType shouldBe dataTypeFromSchema
+    // instants map to TIMESTAMP_LTZ, wall-clock values to TIMESTAMP, both with Flink's default precision 6
+    dataType shouldBe DataTypes.ROW(
+      DataTypes.FIELD("localDateTime", DataTypes.TIMESTAMP(6).notNull),
+      DataTypes.FIELD("date", DataTypes.DATE.notNull),
+      DataTypes.FIELD("instant", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6).notNull),
+      DataTypes.FIELD("localDate", DataTypes.DATE.notNull),
+      DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP(6).notNull),
+      DataTypes.FIELD("offsetDateTime", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6).notNull),
+      DataTypes.FIELD("localTime", DataTypes.TIME(3).notNull)
+    ).notNull
   }
 
   it should "derive java.util.Date" in {
     case class WithUtilDate(d: java.util.Date)
     val dataType = FlinkDataType[WithUtilDate]
 
-    // deviates from Avro: java.util.Date behaves like an Instant and maps to TIMESTAMP_LTZ
+    // java.util.Date behaves like an Instant and maps to TIMESTAMP_LTZ
     dataType shouldBe DataTypes.ROW(
-      DataTypes.FIELD("d", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull)
+      DataTypes.FIELD("d", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6).notNull)
+    ).notNull
+  }
+
+  it should "derive timestamps with a custom precision" in {
+    case class WithInstant(i: Instant, ldt: LocalDateTime)
+    given TimestampPrecision = TimestampPrecision(3)
+    val dataType             = FlinkDataType[WithInstant]
+
+    dataType shouldBe DataTypes.ROW(
+      DataTypes.FIELD("i", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull),
+      DataTypes.FIELD("ldt", DataTypes.TIMESTAMP(3).notNull)
     ).notNull
   }
 

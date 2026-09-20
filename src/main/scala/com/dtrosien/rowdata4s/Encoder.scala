@@ -12,7 +12,6 @@ import org.apache.flink.types.RowKind
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
-import java.time.format.DateTimeFormatter
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
@@ -491,8 +490,8 @@ trait TemporalEncoders:
   given Encoder[LocalDateTime]               = LocalDateTimeEncoder
 
   given DateEncoder: Encoder[Date] = IntEncoder.contramap[Date](_.toLocalDate.toEpochDay.toInt)
-  given OffsetDateTimeEncoder: Encoder[OffsetDateTime] =
-    StringEncoder.contramap[OffsetDateTime](_.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+  // an OffsetDateTime is an instant, the offset itself is not kept
+  given OffsetDateTimeEncoder: Encoder[OffsetDateTime] = InstantEncoder.contramap[OffsetDateTime](_.toInstant)
 
 object LocalTimeEncoder extends Encoder[LocalTime]:
   override def encode(logicalType: LogicalType): LocalTime => Any = {

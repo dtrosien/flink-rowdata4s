@@ -262,21 +262,21 @@ class DecoderTest extends UnitSpec:
         localTime: LocalTime
     )
 
-    val testInstant = Instant.now
-    val testDate    = LocalDate.now
-    val testOffsetDateTime =
-      OffsetDateTime.ofInstant(testInstant.truncatedTo(ChronoUnit.MILLIS), ZoneOffset.UTC) // truncate to millis
+    val testInstant       = Instant.now
+    val testDate          = LocalDate.now
+    val testLocalDateTime = LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
 
+    // the derived schema: TIMESTAMP(6) for wall-clock values, TIMESTAMP_LTZ(6) for instants, TIME(3), DATE
     val logicalType = FlinkDataType[TimeAndDates].getLogicalType
 
     val rowData: RowData = {
       val row = new GenericRowData(RowKind.INSERT, 7)
-      row.setField(0, TimestampData.fromInstant(testInstant).getMillisecond)
+      row.setField(0, TimestampData.fromLocalDateTime(testLocalDateTime))
       row.setField(1, Int.box(testDate.toEpochDay.toInt))
       row.setField(2, TimestampData.fromInstant(testInstant))
       row.setField(3, LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay.toInt)
       row.setField(4, TimestampData.fromInstant(testInstant))
-      row.setField(5, StringData.fromString(testOffsetDateTime.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)))
+      row.setField(5, TimestampData.fromInstant(testInstant))
       row.setField(6, Int.box((LocalTime.of(10, 30).toNanoOfDay / 1_000_000).toInt))
       row
     }
@@ -285,14 +285,12 @@ class DecoderTest extends UnitSpec:
 
     val timesAndDates = fromRowData.from(rowData)
 
-    timesAndDates.localDateTime shouldBe LocalDateTime
-      .ofInstant(testInstant, ZoneOffset.UTC)
-      .truncatedTo(ChronoUnit.MILLIS)
+    timesAndDates.localDateTime shouldBe testLocalDateTime
     timesAndDates.date shouldBe Date.valueOf(testDate)
     timesAndDates.instant shouldBe testInstant
     timesAndDates.localDate shouldBe testDate
     timesAndDates.timestamp shouldBe Timestamp.from(testInstant)
-    timesAndDates.offsetDateTime.toInstant shouldBe testOffsetDateTime.toInstant // use of instant to have stable tests
+    timesAndDates.offsetDateTime shouldBe OffsetDateTime.ofInstant(testInstant, ZoneOffset.UTC)
     timesAndDates.localTime shouldBe LocalTime.of(10, 30)
 
   }
