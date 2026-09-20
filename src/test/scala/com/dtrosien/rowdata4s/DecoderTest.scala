@@ -298,7 +298,7 @@ class DecoderTest extends UnitSpec:
   it should "convert BigInt to Instant" in {
     case class Test(id: Int, inst: Instant)
 
-    // required because avro derivation uses timestampdata for inst
+    // custom schema: the derived schema would use TIMESTAMP_LTZ for the Instant
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("id", INT()),
       DataTypes.FIELD("inst", BIGINT())

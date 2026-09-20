@@ -12,7 +12,7 @@ import java.sql.Timestamp
 import java.time.*
 import java.util.{Date, UUID}
 
-/** A [[DataTypeFor]] generates an Avro Schema for a Scala or Java type.
+/** A [[DataTypeFor]] generates a Flink [[DataType]] for a Scala or Java type.
   *
   * For example, a DataTypeFor[String] could return a datatype of type DataType.STRING, and a DataTypeFor[Int] could
   * return a datatype of type DataType.INT
