@@ -1,5 +1,6 @@
 package com.dtrosien.rowdata4s
 
+import com.dtrosien.rowdata4s.annotations.TableName
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
 import org.apache.flink.core.memory.{DataInputDeserializer, DataOutputSerializer}
 import org.apache.flink.table.api.DataTypes
@@ -331,6 +332,52 @@ class EncoderTest extends UnitSpec:
 
     rowData.getRow(0, 1).getString(0).toString shouldBe "ABC"
     rowData.getRow(0, 1).getInt(1) shouldBe 123
+  }
+
+  it should "write union fields by name when the schema lists the variants in another order" in {
+    sealed trait Shape
+    case class Circle(radius: Double)          extends Shape
+    case class Rect(width: Int, height: Int)   extends Shape
+    case class Record(id: Int, shape: Shape)
+
+    // derived order is Circle, Rect; the table lists Rect first
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", INT().notNull),
+      DataTypes.FIELD(
+        "shape",
+        DataTypes
+          .ROW(
+            DataTypes.FIELD("Rect", DataTypes.ROW(DataTypes.FIELD("width", INT().notNull), DataTypes.FIELD("height", INT().notNull))),
+            DataTypes.FIELD("Circle", DataTypes.ROW(DataTypes.FIELD("radius", DataTypes.DOUBLE().notNull)))
+          )
+          .notNull
+      )
+    )
+    val logicalType                  = customType.getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    val rowData = toRowData.to(Record(1, Circle(2.5)))
+
+    val union = rowData.getRow(1, 2)
+    union.isNullAt(0) shouldBe true // Rect
+    union.getRow(1, 1).getDouble(0) shouldBe 2.5 // Circle
+
+    FromRowData.apply[Record](logicalType).from(rowData) shouldBe Record(1, Circle(2.5))
+    FromRowData.apply[Record](logicalType).from(toRowData.to(Record(2, Rect(3, 4)))) shouldBe Record(2, Rect(3, 4))
+  }
+
+  it should "encode annotated enum cases with the annotated name, so the decoder finds them again" in {
+    sealed trait Status
+    @TableName("ACTIVE") case object Active extends Status
+    case object Inactive                    extends Status
+    case class Record(status: Status)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    toRowData.to(Record(Active)).getString(0).toString shouldBe "ACTIVE"
+    toRowData.to(Record(Inactive)).getString(0).toString shouldBe "Inactive"
+    FromRowData.apply[Record](logicalType).from(toRowData.to(Record(Active))) shouldBe Record(Active)
   }
 
   it should "convert sealed traits" in {

@@ -117,38 +117,63 @@ trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
 // TypeUnion   ==================================
 // ==============================================
 
+/** Encodes a sealed trait as a ROW with one nullable field per subtype (matched by name); only the field of the
+  * actual subtype is set.
+  */
 class TypeUnionEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
   def encode(logicalType: LogicalType): T => Any = {
-    require(!logicalType.getChildren.isEmpty)
-    val encoderBySubtype = ctx.subtypes.zipWithIndex
-      .map((st, i) => {
-        val annos: Annotations       = new Annotations(st.annotations, st.inheritedAnnotations)
-        val names                    = Names(st.typeInfo, annos)
-        val subDataType: LogicalType = logicalType.getChildren.get(i)
-        val encodeT: T => Any        = st.typeclass.asInstanceOf[Encoder[T]].encode(subDataType)
-        (st, (i, encodeT))
-      })
-      .toMap
+    require(logicalType.getTypeRoot == LogicalTypeRoot.ROW)
+    val fields = logicalType.asInstanceOf[RowType].getFields.asScala.toIndexedSeq
+    val arity  = fields.length
+
+    // resolved once per schema, by position in ctx.subtypes: the schema field of the subtype and its encoder
+    val fieldIndexBySubtype = new Array[Int](ctx.subtypes.length)
+    val encoderBySubtype    = new Array[T => Any](ctx.subtypes.length)
+    ctx.subtypes.zipWithIndex.foreach { (st, position) =>
+      val name = Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name
+      val i    = fields.indexWhere(_.getName == name)
+      if i == -1 then throw new IllegalArgumentException(s"Unable to find union field for subtype $name")
+      fieldIndexBySubtype(position) = i
+      encoderBySubtype(position) = st.typeclass.asInstanceOf[Encoder[T]].encode(fields(i).getType)
+    }
 
     { value =>
-      val rowSize = logicalType.getChildren.size()
-      val fields  = new Array[AnyRef](rowSize)
-      ctx.choose(value) { st =>
-        val (index, encodeT) = encoderBySubtype(st.subtype)
-        fields(index) = encodeT.apply(st.cast(value)).asInstanceOf[AnyRef]
-        GenericRowData.of(fields*)
-      }
+      val position = Subtypes.positionOf(ctx, value)
+      val row      = new GenericRowData(arity)
+      row.setField(fieldIndexBySubtype(position), encoderBySubtype(position)(value).asInstanceOf[AnyRef])
+      row
     }
   }
 }
+
+private[rowdata4s] object Subtypes:
+
+  /** Position of the subtype of `value` in `ctx.subtypes`, the same scan as `ctx.choose` without the allocation.
+    * `Subtype.index` is not used because it is not unique for nested sealed hierarchies.
+    */
+  def positionOf[F[_], T](ctx: SealedTrait[F, T], value: T): Int =
+    val subtypes = ctx.subtypes
+    var i        = 0
+    while i < subtypes.length && !subtypes(i).cast.isDefinedAt(value) do i += 1
+    if i == subtypes.length then
+      throw new IllegalArgumentException(s"The given value `$value` is not a sub type of `${ctx.typeInfo.full}`")
+    i
 
 // ==============================================
 // Enums   ======================================
 // ==============================================
 
+/** Encodes enums and sealed traits of case objects as their (annotation aware) name, the same name the decoder
+  * matches on.
+  */
 class EnumEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
-  def encode(logicalType: LogicalType): T => Any = { (value: T) =>
-    ctx.choose(value) { st => StringEncoder.encode(logicalType)(st.typeInfo.short) }
+  def encode(logicalType: LogicalType): T => Any = {
+    val encodeString = StringEncoder.encode(logicalType)
+    // plain Strings by position in ctx.subtypes; StringData is not serializable and is created per record
+    val namesBySubtype: Array[String] = ctx.subtypes.map { st =>
+      Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name
+    }.toArray
+    { (value: T) => encodeString(namesBySubtype(Subtypes.positionOf(ctx, value))) }
   }
 }
 
@@ -157,8 +182,10 @@ class EnumEncoder[T](ctx: SealedTrait[Encoder, T]) extends Encoder[T] {
 // ==============================================
 
 class ObjectEncoder[T](ctx: magnolia1.CaseClass[Encoder, T]) extends Encoder[T] {
-  def encode(logicalType: LogicalType): T => Any = { (value: T) =>
-    StringEncoder.encode(logicalType)(ctx.typeInfo.short)
+  def encode(logicalType: LogicalType): T => Any = {
+    val encodeString = StringEncoder.encode(logicalType)
+    val name         = ctx.typeInfo.short
+    { (value: T) => encodeString(name) }
   }
 }
 

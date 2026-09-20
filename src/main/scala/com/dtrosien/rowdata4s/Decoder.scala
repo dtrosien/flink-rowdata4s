@@ -90,27 +90,33 @@ trait MagnoliaDerivedDecoder extends AutoDerivation[Decoder]:
 // TypeUnions   =================================
 // ==============================================
 
+/** Decodes a sealed trait from a ROW with one nullable field per subtype (matched by name); the non-null field is
+  * the active one.
+  */
 class TypeUnionDecoder[T](ctx: magnolia1.SealedTrait[Decoder, T]) extends Decoder[T] {
   override def decode(logicalType: LogicalType): Any => T = {
     require(logicalType.getTypeRoot == LogicalTypeRoot.ROW)
-    val fields = logicalType.asInstanceOf[RowType].getFields.asScala
+    val fields = logicalType.asInstanceOf[RowType].getFields.asScala.toIndexedSeq
 
-    val namedSubtypes: Seq[(String, SealedTrait.Subtype[Decoder, T, ?])] =
-      ctx.subtypes.map(st => Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name -> st)
+    val subtypesByName: Map[String, SealedTrait.Subtype[Decoder, T, ?]] =
+      ctx.subtypes.map(st => Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name -> st).toMap
+
+    val getters: Array[RowData.FieldGetter] =
+      fields.zipWithIndex.map { case (field, i) => RowData.createFieldGetter(field.getType, i) }.toArray
+    val decoders: Array[Any => T] = fields.map { field =>
+      subtypesByName.get(field.getName) match {
+        case Some(st) => st.typeclass.asInstanceOf[Decoder[T]].decode(field.getType)
+        case None     => _ => throw new RuntimeException(s"No subtype found for field ${field.getName}")
+      }
+    }.toArray
+    val arity = fields.length
 
     { value =>
       val row = value.asInstanceOf[RowData]
-
-      val (activeField, activeIndex) = fields.zipWithIndex
-        .find { case (_, i) => !row.isNullAt(i) }
-        .getOrElse(throw new RuntimeException("All fields are null in union ROW"))
-
-      val (_, st) = namedSubtypes
-        .find { case (name, _) => name == activeField.getName }
-        .getOrElse(throw new RuntimeException(s"No subtype found for field ${activeField.getName}"))
-
-      val fieldValue = RowData.createFieldGetter(activeField.getType, activeIndex).getFieldOrNull(row)
-      st.typeclass.asInstanceOf[Decoder[T]].decode(activeField.getType)(fieldValue)
+      var i   = 0
+      while i < arity && row.isNullAt(i) do i += 1
+      if i == arity then throw new RuntimeException("All fields are null in union ROW")
+      decoders(i)(getters(i).getFieldOrNull(row))
     }
   }
 }

@@ -400,6 +400,44 @@ class DecoderTest extends UnitSpec:
     test.st shouldBe B("ABC", 123)
   }
 
+  it should "tolerate a union field without subtype unless it is the active one" in {
+    // two subtypes, a sealed trait with a single subtype is encoded as that subtype and not as a union ROW
+    sealed trait Shape
+    case class Circle(radius: Double)        extends Shape
+    case class Rect(width: Int, height: Int) extends Shape
+    case class Record(shape: Shape)
+
+    // the table has a variant the Scala type does not know
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD(
+        "shape",
+        DataTypes
+          .ROW(
+            DataTypes.FIELD("Circle", DataTypes.ROW(DataTypes.FIELD("radius", DataTypes.DOUBLE().notNull))),
+            DataTypes.FIELD("Rect", DataTypes.ROW(DataTypes.FIELD("width", INT().notNull), DataTypes.FIELD("height", INT().notNull))),
+            DataTypes.FIELD("Square", DataTypes.ROW(DataTypes.FIELD("side", INT().notNull)))
+          )
+          .notNull
+      )
+    )
+    val fromRowData = FromRowData.apply[Record](customType.getLogicalType)
+
+    val circle: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, GenericRowData.of(GenericRowData.of(Double.box(2.5)), null, null))
+      row
+    }
+    val square: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, GenericRowData.of(null, null, GenericRowData.of(Int.box(3))))
+      row
+    }
+
+    fromRowData.from(circle) shouldBe Record(Circle(2.5))
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(square)
+    ex.getCause.getMessage should include("Square")
+  }
+
   it should "convert Byte and Short primitives" in {
     case class SmallPrimitives(b: Byte, s: Short)
 
