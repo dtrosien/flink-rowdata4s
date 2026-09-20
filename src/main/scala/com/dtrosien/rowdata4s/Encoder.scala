@@ -215,8 +215,8 @@ class FieldEncoder[T](param: magnolia1.CaseClass.Param[Encoder, T], logicalType:
 trait PrimitiveEncoders {
   given LongEncoder: Encoder[Long]       = Encoder(a => java.lang.Long.valueOf(a))
   given Encoder[Int]                     = IntEncoder
-  given ShortEncoder: Encoder[Short]     = Encoder(a => java.lang.Short.valueOf(a))
-  given ByteEncoder: Encoder[Byte]       = Encoder(a => java.lang.Byte.valueOf(a))
+  given Encoder[Short]                   = ShortEncoder
+  given Encoder[Byte]                    = ByteEncoder
   given DoubleEncoder: Encoder[Double]   = Encoder(a => java.lang.Double.valueOf(a))
   given FloatEncoder: Encoder[Float]     = Encoder(a => java.lang.Float.valueOf(a))
   given BooleanEncoder: Encoder[Boolean] = Encoder(a => java.lang.Boolean.valueOf(a))
@@ -225,6 +225,27 @@ trait PrimitiveEncoders {
 object IntEncoder extends Encoder[Int] {
   override def encode(logicalType: LogicalType): Int => Any = { value => java.lang.Integer.valueOf(value) }
 }
+
+/** The derived DataType maps Byte to INT, so the value is widened to the column type the serializer expects.
+  */
+object ByteEncoder extends Encoder[Byte]:
+  override def encode(logicalType: LogicalType): Byte => Any = logicalType.getTypeRoot match
+    case TINYINT  => value => java.lang.Byte.valueOf(value)
+    case SMALLINT => value => java.lang.Short.valueOf(value.toShort)
+    case INTEGER  => value => java.lang.Integer.valueOf(value.toInt)
+    case BIGINT   => value => java.lang.Long.valueOf(value.toLong)
+    case _ =>
+      throw new UnsupportedOperationException(s"ByteEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+/** The derived DataType maps Short to INT, so the value is widened to the column type the serializer expects.
+  */
+object ShortEncoder extends Encoder[Short]:
+  override def encode(logicalType: LogicalType): Short => Any = logicalType.getTypeRoot match
+    case SMALLINT => value => java.lang.Short.valueOf(value)
+    case INTEGER  => value => java.lang.Integer.valueOf(value.toInt)
+    case BIGINT   => value => java.lang.Long.valueOf(value.toLong)
+    case _ =>
+      throw new UnsupportedOperationException(s"ShortEncoder doesn't support schema type ${logicalType.getTypeRoot}")
 
 // ==============================================
 // String   =====================================

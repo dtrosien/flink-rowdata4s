@@ -7,7 +7,7 @@ import org.apache.flink.table.api.DataTypes.{DECIMAL, INT, MAP, MULTISET, STRING
 import org.apache.flink.table.data.{RowData, TimestampData}
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.{RowType, TimestampType}
+import org.apache.flink.table.types.logical.{RowType, SmallIntType, TimestampType, TinyIntType}
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
@@ -364,8 +364,30 @@ class EncoderTest extends UnitSpec:
     val byteEncoder  = Encoder[Byte]
     val shortEncoder = Encoder[Short]
 
-    byteEncoder.encode(null)(42.toByte) shouldBe java.lang.Byte.valueOf(42.toByte)
-    shortEncoder.encode(null)(100.toShort) shouldBe java.lang.Short.valueOf(100.toShort)
+    byteEncoder.encode(new TinyIntType())(42.toByte) shouldBe java.lang.Byte.valueOf(42.toByte)
+    shortEncoder.encode(new SmallIntType())(100.toShort) shouldBe java.lang.Short.valueOf(100.toShort)
+  }
+
+  it should "widen Byte and Short to the INT column of the derived schema" in {
+    case class SmallPrimitives(b: Byte, s: Short)
+    val smallPrimitives = SmallPrimitives(1, 2)
+
+    val logicalType                           = FlinkDataType[SmallPrimitives].getLogicalType
+    val toRowData: ToRowData[SmallPrimitives] = ToRowData.apply[SmallPrimitives](logicalType)
+
+    val rowData = toRowData.to(smallPrimitives)
+
+    rowData.getInt(0) shouldBe 1
+    rowData.getInt(1) shouldBe 2
+
+    // the serializer only accepts the column's java type
+    val serializer = new RowDataSerializer(logicalType.asInstanceOf[RowType])
+    val out        = new DataOutputSerializer(64)
+    serializer.serialize(rowData, out)
+    val deserialized: RowData = serializer.deserialize(new DataInputDeserializer(out.getCopyOfBuffer))
+
+    FromRowData.apply[SmallPrimitives](logicalType).from(deserialized) shouldBe smallPrimitives
+
   }
 
   it should "convert byte iterables" in {
