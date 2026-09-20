@@ -233,8 +233,10 @@ trait PrimitiveDecoders {
 
   given Decoder[Byte] = new BasicDecoder[Byte] {
     override def decode(value: Any): Byte = value match {
-      case b: Byte => b
-      case _       => value.asInstanceOf[Int].byteValue
+      case byte: Byte   => byte
+      case short: Short => short.toByte
+      case int: Int     => int.toByte
+      case other        => throw new UnsupportedOperationException(s"Cannot convert $other to type BYTE")
     }
   }
 
@@ -280,7 +282,10 @@ trait PrimitiveDecoders {
   }
 
   given Decoder[Boolean] = new BasicDecoder[Boolean] {
-    override def decode(value: Any): Boolean = value.asInstanceOf[Boolean]
+    override def decode(value: Any): Boolean = value match {
+      case boolean: Boolean => boolean
+      case other            => throw new UnsupportedOperationException(s"Cannot convert $other to type BOOLEAN")
+    }
   }
 }
 

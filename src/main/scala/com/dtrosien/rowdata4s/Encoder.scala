@@ -19,7 +19,7 @@ import scala.util.NotGiven
 
 /** Converts a case class T to a Flink [[RowData]]
   */
-trait ToRowData[T <: Product](using NotGiven[T <:< reflect.Enum]) extends Serializable {
+trait ToRowData[T <: Product] extends Serializable {
   def to(t: T): RowData
 }
 
@@ -213,7 +213,7 @@ class FieldEncoder[T](param: magnolia1.CaseClass.Param[Encoder, T], logicalType:
 // ==============================================
 
 trait PrimitiveEncoders {
-  given LongEncoder: Encoder[Long]       = Encoder(a => java.lang.Long.valueOf(a))
+  given Encoder[Long]                    = LongEncoder
   given Encoder[Int]                     = IntEncoder
   given Encoder[Short]                   = ShortEncoder
   given Encoder[Byte]                    = ByteEncoder
@@ -222,9 +222,26 @@ trait PrimitiveEncoders {
   given BooleanEncoder: Encoder[Boolean] = Encoder(a => java.lang.Boolean.valueOf(a))
 }
 
-object IntEncoder extends Encoder[Int] {
-  override def encode(logicalType: LogicalType): Int => Any = { value => java.lang.Integer.valueOf(value) }
-}
+/** Converts to the integer column type the serializer expects: widening is lossless, narrowing wraps around. DATE
+  * is stored as an int (epoch days) and is used by the LocalDate and Date encoders.
+  */
+object IntEncoder extends Encoder[Int]:
+  override def encode(logicalType: LogicalType): Int => Any = logicalType.getTypeRoot match
+    case TINYINT        => value => java.lang.Byte.valueOf(value.toByte)
+    case SMALLINT       => value => java.lang.Short.valueOf(value.toShort)
+    case INTEGER | DATE => value => java.lang.Integer.valueOf(value)
+    case BIGINT         => value => java.lang.Long.valueOf(value.toLong)
+    case _ =>
+      throw new UnsupportedOperationException(s"IntEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+object LongEncoder extends Encoder[Long]:
+  override def encode(logicalType: LogicalType): Long => Any = logicalType.getTypeRoot match
+    case TINYINT  => value => java.lang.Byte.valueOf(value.toByte)
+    case SMALLINT => value => java.lang.Short.valueOf(value.toShort)
+    case INTEGER  => value => java.lang.Integer.valueOf(value.toInt)
+    case BIGINT   => value => java.lang.Long.valueOf(value)
+    case _ =>
+      throw new UnsupportedOperationException(s"LongEncoder doesn't support schema type ${logicalType.getTypeRoot}")
 
 /** The derived DataType maps Byte to INT, so the value is widened to the column type the serializer expects.
   */

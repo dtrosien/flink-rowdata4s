@@ -7,8 +7,9 @@ import org.apache.flink.table.api.DataTypes.{DECIMAL, INT, MAP, MULTISET, STRING
 import org.apache.flink.table.data.{RowData, TimestampData}
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.{RowType, SmallIntType, TimestampType, TinyIntType}
+import org.apache.flink.table.types.logical.{BigIntType, IntType, RowType, SmallIntType, TimestampType, TinyIntType}
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
@@ -428,9 +429,21 @@ class EncoderTest extends UnitSpec:
   it should "support Encoder.contramap" in {
     val intEncoder = Encoder[Int]
     val longToInt  = intEncoder.contramap[Long](_.toInt)
-    val result     = longToInt.encode(null)(42L)
+    val result     = longToInt.encode(new IntType())(42L)
     result shouldBe Integer.valueOf(42)
   }
+
+  it should "convert Int and Long to the integer type of the column" in {
+    val intEncoder  = Encoder[Int]
+    val longEncoder = Encoder[Long]
+
+    intEncoder.encode(new BigIntType())(42) shouldBe java.lang.Long.valueOf(42L)
+    intEncoder.encode(new SmallIntType())(70000) shouldBe java.lang.Short.valueOf(70000.toShort) // wraps around
+    longEncoder.encode(new IntType())(42L) shouldBe Integer.valueOf(42)
+    longEncoder.encode(new IntType())(1L << 33 | 5) shouldBe Integer.valueOf(5) // wraps around
+    an[UnsupportedOperationException] should be thrownBy longEncoder.encode(new TimestampType(3))
+  }
+
 
   it should "throw on unsupported UUID schema type" in {
     import org.apache.flink.table.types.logical.IntType

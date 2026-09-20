@@ -419,6 +419,26 @@ class DecoderTest extends UnitSpec:
     result.s shouldBe 2.toShort
   }
 
+  it should "throw on null for Boolean and Byte instead of returning false and 0" in {
+    case class NotOptional(bool: Boolean, byte: Byte)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bool", DataTypes.BOOLEAN().nullable),
+      DataTypes.FIELD("byte", DataTypes.INT().nullable)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, null)
+      row.setField(1, null)
+      row
+    }
+
+    val fromRowData = FromRowData.apply[NotOptional](customType.getLogicalType)
+
+    an[UnsupportedOperationException] should be thrownBy fromRowData.from(rowData)
+  }
+
   it should "convert byte iterables" in {
     case class ByteIterables(listBytes: List[Byte], seqBytes: Seq[Byte], vecBytes: Vector[Byte])
 
