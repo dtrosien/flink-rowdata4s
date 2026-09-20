@@ -7,7 +7,7 @@ import org.apache.flink.table.api.DataTypes.{DECIMAL, INT, MAP, MULTISET, STRING
 import org.apache.flink.table.data.{RowData, TimestampData}
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.{BigIntType, IntType, RowType, SmallIntType, TimestampType, TinyIntType}
+import org.apache.flink.table.types.logical.{BigIntType, DoubleType, FloatType, IntType, RowType, SmallIntType, TimestampType, TinyIntType}
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
 import java.nio.ByteBuffer
@@ -454,6 +454,17 @@ class EncoderTest extends UnitSpec:
     val longToInt  = intEncoder.contramap[Long](_.toInt)
     val result     = longToInt.encode(new IntType())(42L)
     result shouldBe Integer.valueOf(42)
+  }
+
+  it should "convert Float and Double to the floating point type of the column" in {
+    val floatEncoder  = Encoder[Float]
+    val doubleEncoder = Encoder[Double]
+
+    floatEncoder.encode(new FloatType())(1.5f) shouldBe java.lang.Float.valueOf(1.5f)
+    floatEncoder.encode(new DoubleType())(1.5f) shouldBe java.lang.Double.valueOf(1.5d)
+    doubleEncoder.encode(new DoubleType())(1.5d) shouldBe java.lang.Double.valueOf(1.5d)
+    doubleEncoder.encode(new FloatType())(1.5d) shouldBe java.lang.Float.valueOf(1.5f)
+    an[UnsupportedOperationException] should be thrownBy doubleEncoder.encode(new IntType())
   }
 
   it should "convert Int and Long to the integer type of the column" in {

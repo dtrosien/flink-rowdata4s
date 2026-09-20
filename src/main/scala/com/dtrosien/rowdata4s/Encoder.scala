@@ -217,8 +217,8 @@ trait PrimitiveEncoders {
   given Encoder[Int]                     = IntEncoder
   given Encoder[Short]                   = ShortEncoder
   given Encoder[Byte]                    = ByteEncoder
-  given DoubleEncoder: Encoder[Double]   = Encoder(a => java.lang.Double.valueOf(a))
-  given FloatEncoder: Encoder[Float]     = Encoder(a => java.lang.Float.valueOf(a))
+  given Encoder[Double]                  = DoubleEncoder
+  given Encoder[Float]                   = FloatEncoder
   given BooleanEncoder: Encoder[Boolean] = Encoder(a => java.lang.Boolean.valueOf(a))
 }
 
@@ -233,6 +233,23 @@ object IntEncoder extends Encoder[Int]:
     case BIGINT         => value => java.lang.Long.valueOf(value.toLong)
     case _ =>
       throw new UnsupportedOperationException(s"IntEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+/** Converts to the floating point column type the serializer expects: Float into DOUBLE is lossless, Double into
+  * FLOAT loses precision like a JVM cast.
+  */
+object FloatEncoder extends Encoder[Float]:
+  override def encode(logicalType: LogicalType): Float => Any = logicalType.getTypeRoot match
+    case FLOAT  => value => java.lang.Float.valueOf(value)
+    case DOUBLE => value => java.lang.Double.valueOf(value.toDouble)
+    case _ =>
+      throw new UnsupportedOperationException(s"FloatEncoder doesn't support schema type ${logicalType.getTypeRoot}")
+
+object DoubleEncoder extends Encoder[Double]:
+  override def encode(logicalType: LogicalType): Double => Any = logicalType.getTypeRoot match
+    case FLOAT  => value => java.lang.Float.valueOf(value.toFloat)
+    case DOUBLE => value => java.lang.Double.valueOf(value)
+    case _ =>
+      throw new UnsupportedOperationException(s"DoubleEncoder doesn't support schema type ${logicalType.getTypeRoot}")
 
 object LongEncoder extends Encoder[Long]:
   override def encode(logicalType: LogicalType): Long => Any = logicalType.getTypeRoot match
