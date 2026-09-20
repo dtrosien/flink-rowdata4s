@@ -4,7 +4,6 @@ import com.dtrosien.rowdata4s.annotations.{Annotations, Names}
 import com.dtrosien.rowdata4s.datatype.{CaseClassShape, DatatypeShape, SealedTraitShape}
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.data.*
-import org.apache.flink.table.data.RowData.FieldGetter
 import org.apache.flink.table.types.logical.*
 import org.apache.flink.table.types.logical.LogicalTypeRoot.*
 
@@ -147,34 +146,25 @@ class ObjectDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] 
 // Row and Field   ==============================
 // ==============================================
 
+/** Decodes a ROW into a case class. Columns are matched to case class parameters by name, so the column order in the
+  * schema does not have to match the parameter order. Columns without a parameter are ignored; a parameter without a
+  * column takes its default value, or None if it is an Option.
+  */
 class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
 
   override def decode(logicalType: LogicalType): Any => T = {
     val fields = logicalType.asInstanceOf[RowType].getFields.asScala
 
-    val decoders = fields.zipWithIndex.map { case (field, i) =>
-      val param       = findParam(field, ctx)
-      val fieldType   = field.getType
-      val fieldGetter = RowData.createFieldGetter(fieldType, i)
-      if param.isEmpty then throw new Exception(s"Unable to find case class parameter for field ${field.getName}")
-      new FieldDecoder(param.get, fieldType, fieldGetter)
+    // one decoder per case class parameter, in parameter order, so the values match the constructor
+    val decoders = ctx.params.toList.map { param =>
+      val paramName = new Annotations(param.annotations).name.getOrElse(param.label)
+      fields.indexWhere(_.getName == paramName) match {
+        case -1 => FieldDecoder.missing(param)
+        case i  => FieldDecoder(param, fields(i).getType, RowData.createFieldGetter(fields(i).getType, i))
+      }
     }.toArray
 
     t => decodeT(logicalType, decoders, t)
-  }
-
-  /** Finds the matching param from the case class for the given Flink [[RowType.RowField]].
-    */
-  private def findParam(
-      field: RowType.RowField,
-      ctx: magnolia1.CaseClass[Decoder, T]
-  ): Option[CaseClass.Param[Decoder, T]] = {
-    ctx.params.find { param =>
-      val annotations =
-        new Annotations(param.annotations)
-      val paramName = annotations.name.getOrElse(param.label)
-      paramName == field.getName
-    }
   }
 
   private def decodeT(logicalType: LogicalType, decoders: Array[FieldDecoder[T]], value: Any): T = value match {
@@ -192,37 +182,49 @@ class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
   }
 }
 
-/** Decodes normal fields based on the schema.
+/** Decodes one case class parameter from a row.
   */
-class FieldDecoder[T](
-    param: magnolia1.CaseClass.Param[Decoder, T],
-    logicalType: LogicalType,
-    fieldGetter: RowData.FieldGetter
-) extends Serializable {
-  private val decoder = param.typeclass.asInstanceOf[Decoder[T]].decode(logicalType)
+sealed abstract class FieldDecoder[T] extends Serializable {
+  def decode(rowData: RowData): Any
+}
 
-  def decode(rowData: RowData): Any = {
-    fastDecodeFieldValue(rowData, fieldGetter)
+object FieldDecoder {
+
+  /** Decodes normal fields based on the schema.
+    */
+  def apply[T](
+      param: magnolia1.CaseClass.Param[Decoder, T],
+      logicalType: LogicalType,
+      fieldGetter: RowData.FieldGetter
+  ): FieldDecoder[T] = new FieldDecoder[T] {
+    private val decoder = param.typeclass.asInstanceOf[Decoder[T]].decode(logicalType)
+
+    def decode(rowData: RowData): Any = tryDecode(fieldGetter.getFieldOrNull(rowData))
+
+    @inline
+    private def tryDecode(value: Any): Any =
+      try {
+        decoder.apply(value)
+      } catch {
+        case NonFatal(ex) => param.default.getOrElse(throw ex)
+      }
   }
 
-  private def fastDecodeFieldValue(rowData: RowData, fieldGetter: FieldGetter): Any =
-    if fieldGetter == null then defaultFieldValue
-    else tryDecode(fieldGetter.getFieldOrNull(rowData))
-
-  @inline
-  private def defaultFieldValue: Any = param.default match {
-    case Some(default) => default
-    // there is no default, so the field must be an option
-    case None => decoder.apply(null)
+  /** Decoder for a case class parameter without a column in the schema: the default value, None for an Option, or a
+    * failure while building the decoder so that a schema mismatch is found before the first record.
+    */
+  def missing[T](param: magnolia1.CaseClass.Param[Decoder, T]): FieldDecoder[T] = param.default match {
+    case Some(default)                                          => constant(default)
+    case None if param.typeclass.isInstanceOf[OptionDecoder[?]] => constant(None)
+    case None =>
+      throw new IllegalArgumentException(
+        s"Schema has no column for parameter '${param.label}' and the parameter has no default value"
+      )
   }
 
-  @inline
-  private def tryDecode(value: Any): Any =
-    try {
-      decoder.apply(value)
-    } catch {
-      case NonFatal(ex) => param.default.getOrElse(throw ex)
-    }
+  private def constant[T](value: Any): FieldDecoder[T] = new FieldDecoder[T] {
+    def decode(rowData: RowData): Any = value
+  }
 }
 
 // ==============================================

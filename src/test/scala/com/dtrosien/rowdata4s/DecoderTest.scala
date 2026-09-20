@@ -519,6 +519,88 @@ class DecoderTest extends UnitSpec:
     result.name shouldBe "fallback"
   }
 
+  it should "match columns to parameters by name, not by position" in {
+    // parameter order: Int, String, String, Boolean
+    case class User(id: Int, firstName: String, lastName: String, active: Boolean)
+
+    // schema column order: Boolean, String, Int, String - every column sits at a different position than its
+    // parameter, and the types at each position differ, so the decoder can only succeed by matching names.
+    // firstName and lastName share a type; a positional decoder would swap those two silently instead of failing.
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("active", DataTypes.BOOLEAN().notNull), // position 0, parameter 3
+      DataTypes.FIELD("lastName", STRING().notNull),          // position 1, parameter 2
+      DataTypes.FIELD("id", INT().notNull),                   // position 2, parameter 0
+      DataTypes.FIELD("firstName", STRING().notNull)          // position 3, parameter 1
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 4)
+      row.setField(0, Boolean.box(true))
+      row.setField(1, StringData.fromString("Smith"))
+      row.setField(2, Int.box(42))
+      row.setField(3, StringData.fromString("Alice"))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[User](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result shouldBe User(id = 42, firstName = "Alice", lastName = "Smith", active = true)
+  }
+
+  it should "use the default value or None for parameters missing from the schema" in {
+    case class WithDefault(id: Int, name: String = "fallback", extra: Option[Int])
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", INT().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, Int.box(7))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[WithDefault](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result shouldBe WithDefault(7, "fallback", None)
+  }
+
+  it should "throw when creating the FromRowData if a parameter without default has no column in the schema" in {
+    case class IdName(id: String, name: String)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("name", STRING().notNull)
+    )
+
+    val ex = the[IllegalArgumentException] thrownBy FromRowData.apply[IdName](customType.getLogicalType)
+    ex.getMessage should include("id")
+  }
+
+  it should "ignore schema columns without a parameter" in {
+    case class IdName(id: String, name: String)
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", STRING().notNull),
+      DataTypes.FIELD("unused", INT().notNull),
+      DataTypes.FIELD("name", STRING().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 3)
+      row.setField(0, StringData.fromString("u1"))
+      row.setField(1, Int.box(1))
+      row.setField(2, StringData.fromString("Alice"))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[IdName](customType.getLogicalType)
+    val result      = fromRowData.from(rowData)
+
+    result shouldBe IdName("u1", "Alice")
+  }
+
   it should "support Decoder.map" in {
     val intDecoder    = Decoder[Int]
     val stringDecoder = intDecoder.map(_.toString)

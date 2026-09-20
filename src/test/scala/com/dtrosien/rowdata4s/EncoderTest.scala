@@ -361,6 +361,29 @@ class EncoderTest extends UnitSpec:
     rowData.getString(0).toString shouldBe "SomeObject"
   }
 
+  it should "write columns in schema order, matching parameters by name" in {
+    // parameter order: Int, String, String, Boolean
+    case class User(id: Int, firstName: String, lastName: String, active: Boolean)
+    val user = User(id = 42, firstName = "Alice", lastName = "Smith", active = true)
+
+    // schema column order: Boolean, String, Int, String - every column sits at a different position than its
+    // parameter, and the types at each position differ, so the encoder can only succeed by matching names
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("active", DataTypes.BOOLEAN().notNull), // position 0, parameter 3
+      DataTypes.FIELD("lastName", STRING().notNull),          // position 1, parameter 2
+      DataTypes.FIELD("id", INT().notNull),                   // position 2, parameter 0
+      DataTypes.FIELD("firstName", STRING().notNull)          // position 3, parameter 1
+    )
+    val toRowData: ToRowData[User] = ToRowData.apply[User](customType.getLogicalType)
+
+    val rowData = toRowData.to(user)
+
+    rowData.getBoolean(0) shouldBe true
+    rowData.getString(1).toString shouldBe "Smith"
+    rowData.getInt(2) shouldBe 42
+    rowData.getString(3).toString shouldBe "Alice"
+  }
+
   it should "convert Byte and Short primitives" in {
     val byteEncoder  = Encoder[Byte]
     val shortEncoder = Encoder[Short]
