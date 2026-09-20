@@ -17,6 +17,7 @@ import scala.reflect.ClassTag
 import scala.util.NotGiven
 import scala.util.control.NonFatal
 
+
 /** Converts from a Flink [[RowData]] into instances of T.
   */
 trait FromRowData[T <: Product] extends Serializable {
@@ -122,14 +123,21 @@ class EnumDecoder[T](ctx: magnolia1.SealedTrait[Decoder, T]) extends Decoder[T] 
   override def decode(logicalType: LogicalType): Any => T = {
     require(logicalType.getTypeRoot == LogicalTypeRoot.VARCHAR)
 
-    def decodeString = StringDecoder.decode(logicalType)
+    val decodeString = StringDecoder.decode(logicalType)
+
+    val decodersByName: Map[String, Any => T] = ctx.subtypes.map { st =>
+      Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name -> st.typeclass.decode(logicalType)
+    }.toMap
 
     { value =>
       val strValue = decodeString(value)
-      ctx.subtypes
-        .find(st => Names(st.typeInfo, new Annotations(st.annotations, st.inheritedAnnotations)).name == strValue)
-        .map { st => st.typeclass.decode(logicalType)(value) }
-        .get
+      decodersByName.get(strValue) match {
+        case Some(decodeSubtype) => decodeSubtype(value)
+        case None =>
+          throw new IllegalArgumentException(
+            s"Unknown value '$strValue' for ${ctx.typeInfo.full}, expected one of: ${decodersByName.keys.mkString(", ")}"
+          )
+      }
     }
   }
 }
@@ -206,7 +214,13 @@ object FieldDecoder {
       try {
         decoder.apply(value)
       } catch {
-        case NonFatal(ex) => param.default.getOrElse(throw ex)
+        case NonFatal(ex) =>
+          param.default.getOrElse(
+            throw new RowDataDecodingException(
+              s"Cannot decode field '${param.label}' from column of type $logicalType",
+              ex
+            )
+          )
       }
   }
 
@@ -535,3 +549,13 @@ trait TemporalDecoders:
       case other => throw new IllegalArgumentException(s"Unsupported type for Instant decoding: ${other.getClass}")
     }
   }
+
+
+// ==============================================
+// Utils   ===================================
+// ==============================================
+
+/** Thrown when a field of a [[RowData]] cannot be decoded; names the field and the column type, the cause is the
+  * underlying error.
+  */
+class RowDataDecodingException(message: String, cause: Throwable) extends RuntimeException(message, cause)

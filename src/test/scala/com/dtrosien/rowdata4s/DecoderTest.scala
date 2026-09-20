@@ -436,7 +436,51 @@ class DecoderTest extends UnitSpec:
 
     val fromRowData = FromRowData.apply[NotOptional](customType.getLogicalType)
 
-    an[UnsupportedOperationException] should be thrownBy fromRowData.from(rowData)
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(rowData)
+    ex.getCause shouldBe an[UnsupportedOperationException]
+  }
+
+  it should "name the field and the column type when a field cannot be decoded" in {
+    case class IdName(id: Int, name: String)
+
+    // name is declared as INT, so the String decoder fails on the Integer value
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("id", INT().notNull),
+      DataTypes.FIELD("name", INT().notNull)
+    )
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 2)
+      row.setField(0, Int.box(1))
+      row.setField(1, Int.box(5))
+      row
+    }
+
+    val fromRowData = FromRowData.apply[IdName](customType.getLogicalType)
+
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(rowData)
+    ex.getMessage should (include("'name'") and include("INT"))
+    ex.getCause shouldBe an[UnsupportedOperationException]
+  }
+
+  it should "report unknown enum values with the valid names" in {
+    enum Enum {
+      case ABC, CBA
+    }
+
+    case class Test(en: Enum)
+
+    val rowData: RowData = {
+      val row = new GenericRowData(RowKind.INSERT, 1)
+      row.setField(0, StringData.fromString("XYZ"))
+      row
+    }
+
+    val logicalType = FlinkDataType[Test].getLogicalType
+    val fromRowData = FromRowData.apply[Test](logicalType)
+
+    val ex = the[RowDataDecodingException] thrownBy fromRowData.from(rowData)
+    ex.getCause.getMessage should (include("XYZ") and include("ABC") and include("CBA"))
   }
 
   it should "convert byte iterables" in {
