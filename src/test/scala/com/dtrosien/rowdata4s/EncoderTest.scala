@@ -1,11 +1,13 @@
 package com.dtrosien.rowdata4s
 
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
+import org.apache.flink.core.memory.{DataInputDeserializer, DataOutputSerializer}
 import org.apache.flink.table.api.DataTypes
-import org.apache.flink.table.api.DataTypes.{INT, MAP, MULTISET, STRING}
-import org.apache.flink.table.data.TimestampData
+import org.apache.flink.table.api.DataTypes.{DECIMAL, INT, MAP, MULTISET, STRING}
+import org.apache.flink.table.data.{RowData, TimestampData}
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.TimestampType
+import org.apache.flink.table.types.logical.{RowType, TimestampType}
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
@@ -147,6 +149,59 @@ class EncoderTest extends UnitSpec:
     val rowData = toRowData.to(deci)
 
     rowData.getDecimal(0, 8, 2).toBigDecimal.longValue() shouldBe 123L
+
+  }
+
+  it should "convert big decimals with the scale of the column" in {
+    case class Deci(bigDecimal: BigDecimal)
+    val deci = Deci(BigDecimal("1.5")) // scale 1, column has scale 2
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bigDecimal", DECIMAL(10, 2).notNull)
+    )
+    val logicalType                = customType.getLogicalType
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](logicalType)
+
+    val rowData = toRowData.to(deci)
+
+    rowData.getDecimal(0, 10, 2).scale shouldBe 2
+
+    // flink serializes the unscaled value and re-applies the column scale when reading
+    val serializer = new RowDataSerializer(logicalType.asInstanceOf[RowType])
+    val out        = new DataOutputSerializer(64)
+    serializer.serialize(rowData, out)
+    val deserialized: RowData = serializer.deserialize(new DataInputDeserializer(out.getCopyOfBuffer))
+
+    deserialized.getDecimal(0, 10, 2).toBigDecimal shouldBe new java.math.BigDecimal("1.50")
+    FromRowData.apply[Deci](logicalType).from(deserialized) shouldBe Deci(BigDecimal("1.50"))
+
+  }
+
+  it should "round big decimals with more fractional digits than the column" in {
+    case class Deci(bigDecimal: BigDecimal)
+    val deci = Deci(BigDecimal("1.005"))
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bigDecimal", DECIMAL(10, 2).notNull)
+    )
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](customType.getLogicalType)
+
+    val rowData = toRowData.to(deci)
+
+    rowData.getDecimal(0, 10, 2).toBigDecimal shouldBe new java.math.BigDecimal("1.01")
+
+  }
+
+  it should "throw on big decimals that do not fit the column precision" in {
+    case class Deci(bigDecimal: BigDecimal)
+    val deci = Deci(BigDecimal("123456789.123"))
+
+    val customType: DataType = DataTypes.ROW(
+      DataTypes.FIELD("bigDecimal", DECIMAL(10, 2).notNull)
+    )
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](customType.getLogicalType)
+
+    an[IllegalArgumentException] should be thrownBy toRowData.to(deci)
 
   }
 
