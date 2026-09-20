@@ -24,25 +24,10 @@ class Annotations(annos: Seq[Any], inheritedAnnos: Seq[Any] = Nil) {
 case class TableName(override val name: String) extends TableNameable
 
 case class TableTransient()  extends StaticAnnotation
-case class TableErasedName() extends TableFieldReflection
+case class TableErasedName() extends StaticAnnotation
 
-trait TableNameable extends TableFieldReflection {
+trait TableNameable extends StaticAnnotation {
   val name: String
-}
-
-sealed trait TableFieldReflection extends StaticAnnotation {
-  private def getClassFields(clazz: Class[?]): Map[String, Any] = {
-    val fields = clazz.getDeclaredFields
-      .map(field => {
-        field `setAccessible` true
-        field.getName -> field.get(this)
-      })
-      .toMap
-    if clazz.getSuperclass != null then fields ++ getClassFields(clazz.getSuperclass)
-    else fields
-  }
-
-  def getAllFields: Map[String, Any] = getClassFields(this.getClass)
 }
 
 object Annotations {
