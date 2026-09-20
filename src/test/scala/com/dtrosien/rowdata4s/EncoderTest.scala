@@ -8,6 +8,7 @@ import org.apache.flink.table.data.{RowData, TimestampData}
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.{BigIntType, DoubleType, FloatType, IntType, RowType, SmallIntType, TimestampType, TinyIntType}
+import org.apache.flink.types.RowKind
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
 import java.nio.ByteBuffer
@@ -386,6 +387,22 @@ class EncoderTest extends UnitSpec:
     rowData.getString(1).toString shouldBe "Smith"
     rowData.getInt(2) shouldBe 42
     rowData.getString(3).toString shouldBe "Alice"
+  }
+
+  it should "carry the requested RowKind" in {
+    case class Record(id: Int)
+    val record = Record(42)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+
+    toRowData.to(record).getRowKind shouldBe RowKind.INSERT
+    toRowData.to(record, RowKind.UPDATE_BEFORE).getRowKind shouldBe RowKind.UPDATE_BEFORE
+    toRowData.to(record, RowKind.UPDATE_AFTER).getRowKind shouldBe RowKind.UPDATE_AFTER
+    toRowData.to(record, RowKind.DELETE).getRowKind shouldBe RowKind.DELETE
+
+    // the kind does not change the payload
+    toRowData.to(record, RowKind.DELETE).getInt(0) shouldBe 42
   }
 
   it should "convert Byte and Short primitives" in {

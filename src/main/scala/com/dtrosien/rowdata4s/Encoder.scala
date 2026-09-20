@@ -7,6 +7,7 @@ import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.data.*
 import org.apache.flink.table.types.logical.*
 import org.apache.flink.table.types.logical.LogicalTypeRoot.*
+import org.apache.flink.types.RowKind
 
 import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
@@ -20,7 +21,15 @@ import scala.util.NotGiven
 /** Converts a case class T to a Flink [[RowData]]
   */
 trait ToRowData[T <: Product] extends Serializable {
-  def to(t: T): RowData
+
+  /** Converts `t` to a [[RowData]] with row kind `INSERT`.
+    */
+  def to(t: T): RowData = to(t, RowKind.INSERT)
+
+  /** Converts `t` to a [[RowData]] carrying the given [[RowKind]], e.g. to forward the kind of a changelog record
+    * (`toRowData.to(value, sourceRow.getRowKind)`) or to emit a `DELETE` for an upsert sink.
+    */
+  def to(t: T, rowKind: RowKind): RowData
 }
 
 object ToRowData {
@@ -30,8 +39,10 @@ object ToRowData {
     // cache resolved schema
     private val encode: T => Any = encoder.encode(logicalType)
 
-    def to(t: T): RowData = encode(t) match {
-      case rowData: RowData => rowData
+    def to(t: T, rowKind: RowKind): RowData = encode(t) match {
+      case rowData: RowData =>
+        rowData.setRowKind(rowKind)
+        rowData
       case output =>
         val clazz = output.getClass
         throw new UnsupportedOperationException(
