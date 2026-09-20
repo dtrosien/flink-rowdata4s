@@ -70,9 +70,8 @@ trait MagnoliaDerivedDecoder extends AutoDerivation[Decoder]:
 
   override def join[T](ctx: CaseClass[Decoder, T]): Decoder[T] =
     DatatypeShape.of(ctx) match {
-      case CaseClassShape.Record    => RowDecoder(ctx)
-      case CaseClassShape.ValueType => RowDecoder(ctx)
-      case CaseClassShape.Object    => ObjectDecoder(ctx)
+      case CaseClassShape.Record => RowDecoder(ctx)
+      case CaseClassShape.Object => ObjectDecoder(ctx)
     }
 
   override def split[T](ctx: SealedTrait[Decoder, T]): Decoder[T] =

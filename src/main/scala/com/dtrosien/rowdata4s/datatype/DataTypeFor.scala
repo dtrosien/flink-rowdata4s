@@ -72,9 +72,8 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
 
   def join[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] =
     DatatypeShape.of(ctx) match {
-      case CaseClassShape.Record    => Records.dataType(ctx)
-      case CaseClassShape.ValueType => ???
-      case Object                   => Objects.dataType(ctx)
+      case CaseClassShape.Record => Records.dataType(ctx)
+      case CaseClassShape.Object => Objects.dataType(ctx)
     }
 
   override def split[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] =
@@ -87,8 +86,9 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
         }
     }
 
+// value classes (AnyVal) have no shape: Scala 3 provides no Mirror for them, so derivation fails at compile time
 enum CaseClassShape:
-  case ValueType, Record, Object
+  case Record, Object
 
 enum SealedTraitShape:
   case TypeUnion, Enum
@@ -101,8 +101,7 @@ object DatatypeShape:
   }
 
   def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape = {
-    if ctx.isValueClass then CaseClassShape.ValueType
-    else if ctx.isObject then CaseClassShape.Object
+    if ctx.isObject then CaseClassShape.Object
     else if ctx.parameters.isEmpty then CaseClassShape.Object // required to be able to convert simple enums to strings
     else CaseClassShape.Record
   }

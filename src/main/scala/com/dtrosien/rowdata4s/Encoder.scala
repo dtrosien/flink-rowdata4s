@@ -97,9 +97,8 @@ object Encoder
 
 trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
   override def join[T](ctx: CaseClass[Encoder, T]): Encoder[T] = DatatypeShape.of(ctx) match {
-    case CaseClassShape.Record    => RowEncoder(ctx)
-    case CaseClassShape.ValueType => RowEncoder(ctx)
-    case CaseClassShape.Object    => ObjectEncoder(ctx)
+    case CaseClassShape.Record => RowEncoder(ctx)
+    case CaseClassShape.Object => ObjectEncoder(ctx)
   }
 
   override def split[T](ctx: SealedTrait[Encoder, T]): Encoder[T] =
