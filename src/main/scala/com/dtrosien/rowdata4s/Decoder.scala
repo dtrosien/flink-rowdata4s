@@ -76,7 +76,7 @@ trait MagnoliaDerivedDecoder extends AutoDerivation[Decoder]:
     }
 
   override def split[T](ctx: SealedTrait[Decoder, T]): Decoder[T] =
-    DatatypeShape.of[T](ctx) match {
+    DatatypeShape.of(ctx)(_.isInstanceOf[ObjectDecoder[?]]) match {
       case SealedTraitShape.TypeUnion =>
         ctx.subtypes match {
           case IArray(single) => single.typeclass.asInstanceOf[Decoder[T]]

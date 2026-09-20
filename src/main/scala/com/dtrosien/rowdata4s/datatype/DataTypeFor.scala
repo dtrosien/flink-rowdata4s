@@ -78,7 +78,7 @@ trait MagnoliaDerivedDataTypes extends AutoDerivation[DataTypeFor]:
     }
 
   override def split[T](ctx: SealedTrait[DataTypeFor, T]): DataTypeFor[T] =
-    DatatypeShape.of[T](ctx) match {
+    DatatypeShape.of(ctx)(_.isInstanceOf[ObjectDataTypeFor[?]]) match {
       case SealedTraitShape.Enum => Enums.dataType(ctx)
       case SealedTraitShape.TypeUnion =>
         ctx.subtypes match {
@@ -95,9 +95,9 @@ enum SealedTraitShape:
 
 object DatatypeShape:
 
-  def of[T](ctx: SealedTrait[?, T]): SealedTraitShape = {
-    val allSubtypesAreObjects = ctx.subtypes.forall(_.isObject)
-    if ctx.isEnum || allSubtypesAreObjects then SealedTraitShape.Enum else SealedTraitShape.TypeUnion
+  def of[F[_], T](ctx: SealedTrait[F, T])(isObjectTypeclass: Any => Boolean): SealedTraitShape = {
+    val allSubtypesAreObjects = ctx.subtypes.forall(st => st.isObject || isObjectTypeclass(st.typeclass))
+    if allSubtypesAreObjects then SealedTraitShape.Enum else SealedTraitShape.TypeUnion
   }
 
   def of[Typeclass[_], T](ctx: CaseClass[Typeclass, T]): CaseClassShape = {
@@ -112,11 +112,11 @@ object DatatypeShape:
 // ==============================================
 
 object Objects {
-  def dataType[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] = {
-    new DataTypeFor[T] {
-      override def dataType: DataType = DataTypes.STRING.notNull
-    }
-  }
+  def dataType[T](ctx: CaseClass[DataTypeFor, T]): DataTypeFor[T] = new ObjectDataTypeFor[T]
+}
+
+class ObjectDataTypeFor[T] extends DataTypeFor[T] {
+  override def dataType: DataType = DataTypes.STRING.notNull
 }
 
 // ==============================================

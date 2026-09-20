@@ -210,8 +210,26 @@ class DatatypesTest extends UnitSpec:
 
     val dataTypeEn = FlinkDataType[Enum]
 
-    // enums are always derived as their name, the parameters of the cases are not represented
-    dataTypeEn shouldBe STRING.notNull
+    // enum cases with parameters are a union like a sealed trait of case classes
+    dataTypeEn shouldBe ROW(
+      FIELD("A", ROW(FIELD("a", STRING.notNull)).nullable),
+      FIELD("B", ROW(FIELD("a", STRING.notNull), FIELD("b", INT.notNull)).nullable)
+    ).notNull
+  }
+
+  it should "derive mixed enum types" in {
+    enum Enum {
+      case A(a: String)
+      case C
+    }
+
+    val dataTypeEn = FlinkDataType[Enum]
+
+    // a case without parameters becomes a STRING field of the union (Magnolia lists it first)
+    dataTypeEn shouldBe ROW(
+      FIELD("C", STRING.nullable),
+      FIELD("A", ROW(FIELD("a", STRING.notNull)).nullable)
+    ).notNull
   }
 
   it should "derive empty case classes to Strings" in {

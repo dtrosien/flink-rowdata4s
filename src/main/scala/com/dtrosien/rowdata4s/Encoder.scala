@@ -103,7 +103,7 @@ trait MagnoliaDerivedEncoder extends AutoDerivation[Encoder]:
   }
 
   override def split[T](ctx: SealedTrait[Encoder, T]): Encoder[T] =
-    DatatypeShape.of[T](ctx) match {
+    DatatypeShape.of(ctx)(_.isInstanceOf[ObjectEncoder[?]]) match {
       case SealedTraitShape.TypeUnion =>
         ctx.subtypes match {
           case IArray(single) => single.typeclass.asInstanceOf[Encoder[T]]

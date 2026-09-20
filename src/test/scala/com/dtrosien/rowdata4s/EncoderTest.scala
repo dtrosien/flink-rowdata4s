@@ -297,6 +297,27 @@ class EncoderTest extends UnitSpec:
 
   }
 
+  it should "convert rich enums as unions and read them back" in {
+    enum Shape {
+      case Circle(radius: Double)
+      case Rect(width: Int, height: Int)
+      case Unknown
+    }
+    case class Record(id: Int, shape: Shape)
+
+    val logicalType                  = FlinkDataType[Record].getLogicalType
+    val toRowData: ToRowData[Record] = ToRowData.apply[Record](logicalType)
+    val fromRowData                  = FromRowData.apply[Record](logicalType)
+
+    val circle = toRowData.to(Record(1, Shape.Circle(2.5)))
+    circle.getRow(1, 3).getRow(0, 1).getDouble(0) shouldBe 2.5 // payload is kept
+    circle.getRow(1, 3).isNullAt(1) shouldBe true
+    circle.getRow(1, 3).isNullAt(2) shouldBe true
+
+    for shape <- Seq(Shape.Circle(2.5), Shape.Rect(3, 4), Shape.Unknown) do
+      fromRowData.from(toRowData.to(Record(1, shape))) shouldBe Record(1, shape)
+  }
+
   it should "convert enums" in {
     enum Enum {
       case ABC, CBA
