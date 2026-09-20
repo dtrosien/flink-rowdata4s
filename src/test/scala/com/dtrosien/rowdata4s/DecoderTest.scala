@@ -716,6 +716,22 @@ class DecoderTest extends UnitSpec:
     result shouldBe IdName("u1", "Alice")
   }
 
+  it should "be serializable" in {
+    val record      = DecodedRecord(42, "test")
+    val logicalType = FlinkDataType[DecodedRecord].getLogicalType
+    val fromRowData = FromRowData.apply[DecodedRecord](logicalType)
+
+    val bytes = new java.io.ByteArrayOutputStream()
+    val out   = new java.io.ObjectOutputStream(bytes)
+    out.writeObject(fromRowData)
+    out.close()
+    val deserialized = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray))
+      .readObject()
+      .asInstanceOf[FromRowData[DecodedRecord]]
+
+    deserialized.from(ToRowData.apply[DecodedRecord](logicalType).to(record)) shouldBe record
+  }
+
   it should "support Decoder.map" in {
     val intDecoder    = Decoder[Int]
     val stringDecoder = intDecoder.map(_.toString)
@@ -858,3 +874,6 @@ class DecoderTest extends UnitSpec:
 
     a[RuntimeException] should be thrownBy FromRowData.apply[Test](logicalType).from(rowData)
   }
+
+// top level, so that the serialized decoder does not reference a class local to a test method
+case class DecodedRecord(id: Int, name: String)

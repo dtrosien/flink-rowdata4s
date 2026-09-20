@@ -11,6 +11,7 @@ import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
 import java.util.UUID
+import scala.deriving.Mirror
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
 import scala.util.NotGiven
@@ -79,7 +80,25 @@ object Decoder
     with ByteDecoders
     with TemporalDecoders {
   def apply[T](using decoder: Decoder[T]): Decoder[T] = decoder
+
+  /** Derivation for case classes. Magnolia's `rawConstruct` copies the decoded fields into a tuple before calling the
+    * mirror; with the mirror at hand the row decoder constructs from the field array directly. Takes precedence over
+    * the inherited Magnolia given because it is defined in the derived object.
+    */
+  inline given derivedProduct[T](using m: Mirror.ProductOf[T]): Decoder[T] =
+    derived[T] match {
+      case rowDecoder: RowDecoder[T] => rowDecoder.constructingWith(values => m.fromProduct(new ArrayProduct(values)))
+      case other                     => other
+    }
 }
+
+/** Adapts a field array to the [[Product]] a [[Mirror.ProductOf]] constructs from, without an intermediate tuple.
+  * Public only because [[Decoder.derivedProduct]] is inline and references it at the call site; not part of the API.
+  */
+final class ArrayProduct(fields: Array[Any]) extends Product:
+  def productArity: Int            = fields.length
+  def productElement(n: Int): Any  = fields(n)
+  def canEqual(that: Any): Boolean = false
 
 // ==============================================
 // Magnolia   ===================================
@@ -189,7 +208,15 @@ class ObjectDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] 
   * schema does not have to match the parameter order. Columns without a parameter are ignored; a parameter without a
   * column takes its default value, or None if it is an Option.
   */
-class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
+class RowDecoder[T](
+    ctx: magnolia1.CaseClass[Decoder, T],
+    construct: Array[Any] => T
+) extends Decoder[T] {
+
+  def this(ctx: magnolia1.CaseClass[Decoder, T]) = this(ctx, ctx.rawConstruct(_))
+
+  /** The same decoder constructing the case class with the given function instead of Magnolia's `rawConstruct`. */
+  def constructingWith(construct: Array[Any] => T): RowDecoder[T] = new RowDecoder[T](ctx, construct)
 
   /** A nested case class is read straight out of its ROW column. */
   override def decodeField(logicalType: LogicalType, index: Int): RowData => T = {
@@ -222,7 +249,7 @@ class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
         values(i) = decoders(i).decode(rowData)
         i += 1
       }
-      ctx.rawConstruct(values)
+      construct(values)
     case _ =>
       throw new UnsupportedOperationException(s"This decoder can only handle RowData [was ${value.getClass}]")
   }
