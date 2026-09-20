@@ -326,8 +326,27 @@ trait StringEncoders:
   given Encoder[CharSequence] = StringEncoder.contramap(_.toString())
   given Encoder[UUID]         = UUIDEncoder
 
+/** Strings are fitted to the declared length of the column, like Flink's CAST: truncated for `VARCHAR(n)`,
+  * truncated or padded with spaces for `CHAR(n)`. `STRING` (`VARCHAR(MAX)`) and a null schema leave them untouched.
+  * Lengths count code points, as Flink does.
+  */
 object StringEncoder extends Encoder[String]:
-  override def encode(logicalType: LogicalType): String => Any = string => StringData.fromString(string)
+  override def encode(logicalType: LogicalType): String => Any = logicalType match
+    case varchar: VarCharType if varchar.getLength < VarCharType.MAX_LENGTH =>
+      val length = varchar.getLength
+      string => StringData.fromString(truncate(string, length))
+    case char: CharType =>
+      val length = char.getLength
+      string => StringData.fromString(pad(truncate(string, length), length))
+    case _ => string => StringData.fromString(string)
+
+  private def truncate(string: String, length: Int): String =
+    if string.codePointCount(0, string.length) <= length then string
+    else string.substring(0, string.offsetByCodePoints(0, length))
+
+  private def pad(string: String, length: Int): String =
+    val missing = length - string.codePointCount(0, string.length)
+    if missing <= 0 then string else string + " " * missing
 
 object UUIDEncoder extends Encoder[UUID]:
   override def encode(logicalType: LogicalType): UUID => Any = logicalType.getTypeRoot match {

@@ -6,6 +6,7 @@ import com.dtrosien.rowdata4s.datatype.CaseClassShape.Object
 import magnolia1.{AutoDerivation, CaseClass, SealedTrait}
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.types.DataType
+import org.apache.flink.table.types.logical.LogicalTypeRoot
 
 import java.nio.ByteBuffer
 import java.sql.Timestamp
@@ -161,8 +162,9 @@ object Records:
       val fieldAnnos = Annotations(param.annotations)
       if fieldAnnos.transient then None
       else {
-        val name = fieldAnnos.name.getOrElse(param.label)
-        Some(DataTypes.FIELD(name, param.typeclass.dataType))
+        val name     = fieldAnnos.name.getOrElse(param.label)
+        val dataType = FieldAnnotations.applyTo(param.typeclass.dataType, fieldAnnos, s"${ctx.typeInfo.full}.${param.label}")
+        Some(fieldAnnos.comment.fold(DataTypes.FIELD(name, dataType))(DataTypes.FIELD(name, dataType, _)))
       }
     }
 
@@ -170,6 +172,49 @@ object Records:
 
     new DataTypeFor[T] {
       override def dataType: DataType = record
+    }
+  }
+
+/** Applies the field annotations that change the derived column type. The annotated type keeps the nullability of
+  * the derived one, so `Option` fields stay nullable.
+  */
+object FieldAnnotations:
+
+  def applyTo(derived: DataType, annos: Annotations, field: String): DataType = {
+    val root = derived.getLogicalType.getTypeRoot
+
+    def withNullability(dataType: DataType): DataType =
+      if derived.getLogicalType.isNullable then dataType.nullable else dataType.notNull
+
+    val withDecimal = annos.decimal.fold(derived) { d =>
+      require(root == LogicalTypeRoot.DECIMAL, s"@TableDecimal on $field, which does not derive to DECIMAL but to $derived")
+      withNullability(DataTypes.DECIMAL(d.precision, d.scale))
+    }
+
+    val withTimestamp = annos.timestampPrecision.fold(withDecimal) { precision =>
+      root match
+        case LogicalTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE   => withNullability(DataTypes.TIMESTAMP(precision))
+        case LogicalTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE => withNullability(DataTypes.TIMESTAMP_LTZ(precision))
+        case _ =>
+          throw new IllegalArgumentException(
+            s"@TableTimestampPrecision on $field, which does not derive to a TIMESTAMP but to $derived"
+          )
+    }
+
+    def requireString(annotation: String): Unit =
+      require(
+        root == LogicalTypeRoot.VARCHAR || root == LogicalTypeRoot.CHAR,
+        s"$annotation on $field, which does not derive to STRING but to $derived"
+      )
+
+    val withVarchar = annos.varchar.fold(withTimestamp) { length =>
+      requireString("@TableVarchar")
+      withNullability(DataTypes.VARCHAR(length))
+    }
+
+    annos.char.fold(withVarchar) { length =>
+      requireString("@TableChar")
+      withNullability(DataTypes.CHAR(length))
     }
   }
 

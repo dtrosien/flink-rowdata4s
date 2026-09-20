@@ -1,7 +1,7 @@
 package com.dtrosien.rowdata4s.datatype
 
 import com.dtrosien.rowdata4s.UnitSpec
-import com.dtrosien.rowdata4s.annotations.{TableName, TableTransient}
+import com.dtrosien.rowdata4s.annotations.{TableChar, TableComment, TableDecimal, TableName, TableTimestampPrecision, TableTransient, TableVarchar}
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.api.DataTypes.*
 
@@ -159,6 +159,46 @@ class DatatypesTest extends UnitSpec:
 
     // the field is renamed, the transient field is left out
     dataType shouldBe ROW(FIELD("ID_RENAMED", INT.notNull)).notNull
+  }
+
+  it should "use field annotations for decimal precision, timestamp precision and comments" in {
+    case class Test(
+        @TableDecimal(18, 4) amount: BigDecimal,
+        @TableDecimal(5, 2) rate: Option[BigDecimal],
+        @TableTimestampPrecision(3) at: Instant,
+        @TableTimestampPrecision(9) @TableComment("wall-clock time of the event") happenedAt: LocalDateTime,
+        @TableComment("the id") id: Int
+    )
+    val dataType = FlinkDataType[Test]
+
+    dataType shouldBe ROW(
+      FIELD("amount", DECIMAL(18, 4).notNull),
+      FIELD("rate", DECIMAL(5, 2).nullable),
+      FIELD("at", TIMESTAMP_WITH_LOCAL_TIME_ZONE(3).notNull),
+      FIELD("happenedAt", TIMESTAMP(9).notNull, "wall-clock time of the event"),
+      FIELD("id", INT.notNull, "the id")
+    ).notNull
+  }
+
+  it should "use field annotations for string lengths" in {
+    case class Test(@TableVarchar(50) name: String, @TableChar(2) country: Option[String], @TableVarchar(36) id: UUID)
+    val dataType = FlinkDataType[Test]
+
+    dataType shouldBe ROW(
+      FIELD("name", VARCHAR(50).notNull),
+      FIELD("country", CHAR(2).nullable),
+      FIELD("id", VARCHAR(36).notNull)
+    ).notNull
+  }
+
+  it should "reject decimal, timestamp and string annotations on fields of another type" in {
+    case class WrongDecimal(@TableDecimal(5, 2) id: Int)
+    case class WrongTimestamp(@TableTimestampPrecision(3) name: String)
+    case class WrongVarchar(@TableVarchar(5) id: Int)
+
+    an[IllegalArgumentException] should be thrownBy FlinkDataType[WrongDecimal]
+    an[IllegalArgumentException] should be thrownBy FlinkDataType[WrongTimestamp]
+    an[IllegalArgumentException] should be thrownBy FlinkDataType[WrongVarchar]
   }
 
   it should "derive enum types" in {

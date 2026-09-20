@@ -18,7 +18,7 @@ conversion class of:
 |---------------------------------------------------|-----------------------------------------|
 | `Int`, `Byte`, `Short`                            | `INT`                                   |
 | `Long`, `Float`, `Double`, `Boolean`              | `BIGINT`, `FLOAT`, `DOUBLE`, `BOOLEAN`  |
-| `String`, `CharSequence`, `UUID`                  | `STRING`                                |
+| `String`, `CharSequence`, `UUID`                  | `STRING`; see `@TableVarchar` / `@TableChar` |
 | `BigDecimal`                                      | `DECIMAL(p, s)` from a `ScalePrecision` given, default `(8, 2)` |
 | `Array[Byte]`, `Seq[Byte]`, `ByteBuffer`          | `BYTES`                                 |
 | `Instant`, `java.util.Date`, `OffsetDateTime`     | `TIMESTAMP_LTZ(p)`                      |
@@ -35,6 +35,28 @@ conversion class of:
 `p` comes from a `TimestampPrecision` given and defaults to 6, Flink's default and what Iceberg stores; use
 `TimestampPrecision(3)` for Flink's compact millisecond representation. Any mapping can be replaced by putting your
 own `given DataTypeFor[T]` in scope.
+
+Field annotations (package `com.dtrosien.rowdata4s.annotations`) adjust single columns; the codecs follow the
+schema, so they apply to encoding and decoding as well:
+
+| Annotation                        | Effect                                                              |
+|-----------------------------------|---------------------------------------------------------------------|
+| `@TableName("col")`               | column name (also for the union field of a sealed trait / enum case) |
+| `@TableTransient()`               | field is left out of the schema                                     |
+| `@TableDecimal(precision, scale)` | `DECIMAL(precision, scale)` for this `BigDecimal` field             |
+| `@TableTimestampPrecision(p)`     | `TIMESTAMP(p)` / `TIMESTAMP_LTZ(p)` for this temporal field         |
+| `@TableComment("text")`           | column description (becomes the column doc of an Iceberg table)     |
+| `@TableVarchar(n)`                | `VARCHAR(n)` for this `String` field; longer values are truncated on encode |
+| `@TableChar(n)`                   | `CHAR(n)` for this `String` field; values are truncated or space-padded on encode |
+
+```scala
+case class Payment(
+    @TableComment("payment id") id: String,
+    @TableDecimal(18, 4) amount: BigDecimal,
+    @TableTimestampPrecision(3) at: Instant,
+    @TableTransient() cachedTotal: BigDecimal
+)
+```
 
 Algebraic data types (ADTs) are flattened into a `Row` containing optional fields for each variant; only the field of
 the actual variant is set. Simple enums are treated as Strings.

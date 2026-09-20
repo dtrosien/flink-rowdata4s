@@ -1,6 +1,6 @@
 package com.dtrosien.rowdata4s
 
-import com.dtrosien.rowdata4s.annotations.TableName
+import com.dtrosien.rowdata4s.annotations.{TableChar, TableDecimal, TableName, TableVarchar}
 import com.dtrosien.rowdata4s.datatype.FlinkDataType
 import org.apache.flink.core.memory.{DataInputDeserializer, DataOutputSerializer}
 import org.apache.flink.table.api.DataTypes
@@ -8,7 +8,7 @@ import org.apache.flink.table.api.DataTypes.{DECIMAL, INT, MAP, MULTISET, STRING
 import org.apache.flink.table.data.{RowData, TimestampData}
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.{BigIntType, DoubleType, FloatType, IntType, RowType, SmallIntType, TimestampType, TinyIntType}
+import org.apache.flink.table.types.logical.{BigIntType, CharType, DoubleType, FloatType, IntType, RowType, SmallIntType, TimestampType, TinyIntType, VarCharType}
 import org.apache.flink.types.RowKind
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
@@ -72,6 +72,35 @@ class EncoderTest extends UnitSpec:
 
     rowData.getRow(1, 1).getString(0).toString shouldBe "someName"
 
+  }
+
+  it should "fit Strings to the declared column length" in {
+    val stringEncoder = Encoder[String]
+
+    // VARCHAR(n) truncates, STRING (VARCHAR(MAX)) does not
+    stringEncoder.encode(new VarCharType(3))("abcdef").toString shouldBe "abc"
+    stringEncoder.encode(new VarCharType(3))("ab").toString shouldBe "ab"
+    stringEncoder.encode(new VarCharType(VarCharType.MAX_LENGTH))("abcdef").toString shouldBe "abcdef"
+
+    // CHAR(n) truncates or pads with spaces
+    stringEncoder.encode(new CharType(5))("ab").toString shouldBe "ab   "
+    stringEncoder.encode(new CharType(2))("abc").toString shouldBe "ab"
+
+    // lengths count code points, not UTF-16 units
+    stringEncoder.encode(new VarCharType(2))("\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00").toString shouldBe "\uD83D\uDE00\uD83D\uDE00"
+  }
+
+  it should "truncate annotated String fields through the derived schema" in {
+    case class Test(@TableVarchar(3) name: String, @TableChar(2) country: String)
+
+    val logicalType                = FlinkDataType[Test].getLogicalType
+    val toRowData: ToRowData[Test] = ToRowData.apply[Test](logicalType)
+
+    val rowData = toRowData.to(Test("Alice", "D"))
+
+    rowData.getString(0).toString shouldBe "Ali"
+    rowData.getString(1).toString shouldBe "D "
+    FromRowData.apply[Test](logicalType).from(rowData) shouldBe Test("Ali", "D ")
   }
 
   it should "convert String" in {
@@ -154,6 +183,19 @@ class EncoderTest extends UnitSpec:
 
     rowData.getDecimal(0, 8, 2).toBigDecimal.longValue() shouldBe 123L
 
+  }
+
+  it should "encode big decimals with the precision and scale of a @TableDecimal annotation" in {
+    case class Deci(@TableDecimal(18, 4) amount: BigDecimal)
+    val deci = Deci(BigDecimal("12345678901234.5"))
+
+    val logicalType                = FlinkDataType[Deci].getLogicalType
+    val toRowData: ToRowData[Deci] = ToRowData.apply[Deci](logicalType)
+
+    val rowData = toRowData.to(deci)
+
+    rowData.getDecimal(0, 18, 4).toBigDecimal shouldBe new java.math.BigDecimal("12345678901234.5000")
+    FromRowData.apply[Deci](logicalType).from(rowData) shouldBe Deci(BigDecimal("12345678901234.5000"))
   }
 
   it should "convert big decimals with the scale of the column" in {
