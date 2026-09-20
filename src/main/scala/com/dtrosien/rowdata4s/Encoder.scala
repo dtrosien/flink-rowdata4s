@@ -460,9 +460,22 @@ object LocalTimeEncoder extends Encoder[LocalTime]:
     { value => java.lang.Integer.valueOf((value.toNanoOfDay / 1_000_000).toInt) }
   }
 
+/** Flink stores TIMESTAMP columns with precision <= 3 as milliseconds only and its serializer asserts that the
+  * nano-of-millisecond part is zero (it is silently dropped without `-ea`). Values are truncated to milliseconds for
+  * those columns so that the behaviour does not depend on assertions being enabled.
+  */
+private[rowdata4s] object Timestamps:
+  def precisionOf(logicalType: LogicalType): Int = logicalType match
+    case t: TimestampType           => t.getPrecision
+    case t: LocalZonedTimestampType => t.getPrecision
+    case _                          => TimestampType.MAX_PRECISION
+
+  def isCompact(logicalType: LogicalType): Boolean = TimestampData.isCompact(precisionOf(logicalType))
+
 object InstantEncoder extends Encoder[Instant]:
   override def encode(logicalType: LogicalType): Instant => Any = {
-    { value => TimestampData.fromInstant(value) }
+    if Timestamps.isCompact(logicalType) then { value => TimestampData.fromEpochMillis(value.toEpochMilli) }
+    else { value => TimestampData.fromInstant(value) }
   }
 
 object LocalDateTimeEncoder extends Encoder[LocalDateTime]:
@@ -471,6 +484,8 @@ object LocalDateTimeEncoder extends Encoder[LocalDateTime]:
   override def encode(logicalType: LogicalType): LocalDateTime => Any = {
     logicalType.getTypeRoot match
       case BIGINT => value => java.lang.Long.valueOf(epochMillis(value))
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE | TIMESTAMP_WITHOUT_TIME_ZONE if Timestamps.isCompact(logicalType) =>
+        value => TimestampData.fromEpochMillis(epochMillis(value))
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE | TIMESTAMP_WITHOUT_TIME_ZONE =>
         value => TimestampData.fromLocalDateTime(value)
       case _ =>

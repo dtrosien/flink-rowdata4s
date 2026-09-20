@@ -14,6 +14,7 @@ import java.nio.ByteBuffer
 import java.sql.{Date, Timestamp}
 import java.time.*
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
@@ -260,12 +261,13 @@ class EncoderTest extends UnitSpec:
     // checks
     rowData.getLong(0) shouldBe testInstant.toEpochMilli
     rowData.getInt(1) shouldBe LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay
-    rowData.getTimestamp(2, 8).toInstant shouldBe testInstant
+    // the derived schema is TIMESTAMP(3): sub-millisecond parts are truncated on encode
+    rowData.getTimestamp(2, 8).toInstant shouldBe testInstant.truncatedTo(ChronoUnit.MILLIS)
     rowData.getInt(3) shouldBe LocalDate.ofInstant(testInstant, ZoneOffset.UTC).toEpochDay
 
     // flink timestamp is transformed to LocalDateTimeFirst before getting converted to Timestamp
     rowData.getTimestamp(4, 8).toTimestamp shouldBe Timestamp.valueOf(
-      LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
+      LocalDateTime.ofInstant(testInstant.truncatedTo(ChronoUnit.MILLIS), ZoneOffset.UTC)
     )
 
     rowData.getInt(5) shouldBe (LocalTime.ofInstant(testInstant, ZoneOffset.UTC).toNanoOfDay / 1_000_000).toInt
@@ -278,7 +280,9 @@ class EncoderTest extends UnitSpec:
 
     // TIMESTAMP_WITHOUT_TIME_ZONE branch (FlinkDataType uses BIGINT for LocalDateTime by default)
     val ldt = LocalDateTime.ofInstant(testInstant, ZoneOffset.UTC)
-    Encoder[LocalDateTime].encode(new TimestampType(false, 3))(ldt) shouldBe TimestampData.fromLocalDateTime(ldt)
+    Encoder[LocalDateTime].encode(new TimestampType(false, 6))(ldt) shouldBe TimestampData.fromLocalDateTime(ldt)
+    Encoder[LocalDateTime].encode(new TimestampType(false, 3))(ldt) shouldBe
+      TimestampData.fromLocalDateTime(ldt.truncatedTo(ChronoUnit.MILLIS))
 
   }
 
@@ -454,6 +458,22 @@ class EncoderTest extends UnitSpec:
     val longToInt  = intEncoder.contramap[Long](_.toInt)
     val result     = longToInt.encode(new IntType())(42L)
     result shouldBe Integer.valueOf(42)
+  }
+
+  it should "truncate timestamps to milliseconds for columns with precision <= 3" in {
+    case class Ts(instant: Instant)
+    val ts = Ts(Instant.ofEpochSecond(1, 123456789))
+
+    val millisType: DataType = DataTypes.ROW(DataTypes.FIELD("instant", DataTypes.TIMESTAMP(3).notNull))
+    val nanosType: DataType  = DataTypes.ROW(DataTypes.FIELD("instant", DataTypes.TIMESTAMP(9).notNull))
+
+    val millisRow = ToRowData.apply[Ts](millisType.getLogicalType).to(ts)
+    val nanosRow  = ToRowData.apply[Ts](nanosType.getLogicalType).to(ts)
+
+    // the serializer for TIMESTAMP(3) asserts that no nano-of-millisecond part is present
+    millisRow.getTimestamp(0, 3).getNanoOfMillisecond shouldBe 0
+    millisRow.getTimestamp(0, 3).toInstant shouldBe Instant.ofEpochSecond(1, 123000000)
+    nanosRow.getTimestamp(0, 9).toInstant shouldBe ts.instant
   }
 
   it should "convert Float and Double to the floating point type of the column" in {
