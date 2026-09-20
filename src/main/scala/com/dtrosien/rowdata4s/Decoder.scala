@@ -42,13 +42,32 @@ trait Decoder[T] extends Serializable {
 
   def decode(logicalType: LogicalType): Any => T
 
+  /** Reads column `index` of a row and decodes it. The default goes through the schema's [[RowData.FieldGetter]] and
+    * [[decode]]; decoders for types with a typed [[RowData]] accessor override it to read the column directly, which
+    * skips the boxing getter and the type test of [[decode]].
+    */
+  def decodeField(logicalType: LogicalType, index: Int): RowData => T = {
+    val getter  = RowData.createFieldGetter(logicalType, index)
+    val decodeT = decode(logicalType)
+    row => decodeT(getter.getFieldOrNull(row))
+  }
+
   final def map[U](f: T => U): Decoder[U] = new Decoder[U] {
     override def decode(logicalType: LogicalType): Any => U = {
       val decodeT = self.decode(logicalType)
       input => f(decodeT(input))
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => U = {
+      val decodeT = self.decodeField(logicalType, index)
+      row => f(decodeT(row))
+    }
   }
 }
+
+private[rowdata4s] object Columns:
+  /** The error the decoders raise for a null value, so the field fallback and the message stay the same. */
+  def nullColumn(target: String): Nothing = throw new UnsupportedOperationException(s"Cannot convert null to type $target")
 
 object Decoder
     extends MagnoliaDerivedDecoder
@@ -92,6 +111,14 @@ trait MagnoliaDerivedDecoder extends AutoDerivation[Decoder]:
   * the active one.
   */
 class TypeUnionDecoder[T](ctx: magnolia1.SealedTrait[Decoder, T]) extends Decoder[T] {
+
+  /** A sealed trait is read straight out of its union ROW column. */
+  override def decodeField(logicalType: LogicalType, index: Int): RowData => T = {
+    val decodeRow = decode(logicalType)
+    val arity     = logicalType.asInstanceOf[RowType].getFieldCount
+    row => if row.isNullAt(index) then Columns.nullColumn(ctx.typeInfo.full) else decodeRow(row.getRow(index, arity))
+  }
+
   override def decode(logicalType: LogicalType): Any => T = {
     require(logicalType.getTypeRoot == LogicalTypeRoot.ROW)
     val fields = logicalType.asInstanceOf[RowType].getFields.asScala.toIndexedSeq
@@ -164,6 +191,13 @@ class ObjectDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] 
   */
 class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
 
+  /** A nested case class is read straight out of its ROW column. */
+  override def decodeField(logicalType: LogicalType, index: Int): RowData => T = {
+    val decodeRow = decode(logicalType)
+    val arity     = logicalType.asInstanceOf[RowType].getFieldCount
+    row => if row.isNullAt(index) then Columns.nullColumn(ctx.typeInfo.full) else decodeRow(row.getRow(index, arity))
+  }
+
   override def decode(logicalType: LogicalType): Any => T = {
     val fields = logicalType.asInstanceOf[RowType].getFields.asScala
 
@@ -172,7 +206,7 @@ class RowDecoder[T](ctx: magnolia1.CaseClass[Decoder, T]) extends Decoder[T] {
       val paramName = new Annotations(param.annotations).name.getOrElse(param.label)
       fields.indexWhere(_.getName == paramName) match {
         case -1 => FieldDecoder.missing(param)
-        case i  => FieldDecoder(param, fields(i).getType, RowData.createFieldGetter(fields(i).getType, i))
+        case i  => FieldDecoder(param, fields(i).getType, i)
       }
     }.toArray
 
@@ -207,13 +241,13 @@ object FieldDecoder {
   def apply[T](
       param: magnolia1.CaseClass.Param[Decoder, T],
       logicalType: LogicalType,
-      fieldGetter: RowData.FieldGetter
+      index: Int
   ): FieldDecoder[T] = new FieldDecoder[T] {
-    private val decoder = param.typeclass.asInstanceOf[Decoder[T]].decode(logicalType)
+    private val decoder = param.typeclass.asInstanceOf[Decoder[T]].decodeField(logicalType, index)
 
     def decode(rowData: RowData): Any =
       try {
-        decoder.apply(fieldGetter.getFieldOrNull(rowData))
+        decoder.apply(rowData)
       } catch {
         case NonFatal(ex) =>
           param.default.getOrElse(
@@ -255,6 +289,12 @@ trait PrimitiveDecoders {
       case int: Int     => int.toByte
       case other        => throw new UnsupportedOperationException(s"Cannot convert $other to type BYTE")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Byte = logicalType.getTypeRoot match
+      case TINYINT  => row => if row.isNullAt(index) then Columns.nullColumn("BYTE") else row.getByte(index)
+      case SMALLINT => row => if row.isNullAt(index) then Columns.nullColumn("BYTE") else row.getShort(index).toByte
+      case INTEGER  => row => if row.isNullAt(index) then Columns.nullColumn("BYTE") else row.getInt(index).toByte
+      case _        => super.decodeField(logicalType, index)
   }
 
   given Decoder[Short] = new BasicDecoder[Short] {
@@ -262,7 +302,14 @@ trait PrimitiveDecoders {
       case b: Byte  => b
       case s: Short => s
       case i: Int   => i.toShort
+      case other    => throw new UnsupportedOperationException(s"Cannot convert $other to type SHORT")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Short = logicalType.getTypeRoot match
+      case SMALLINT => row => if row.isNullAt(index) then Columns.nullColumn("SHORT") else row.getShort(index)
+      case TINYINT  => row => if row.isNullAt(index) then Columns.nullColumn("SHORT") else row.getByte(index).toShort
+      case INTEGER  => row => if row.isNullAt(index) then Columns.nullColumn("SHORT") else row.getInt(index).toShort
+      case _        => super.decodeField(logicalType, index)
   }
 
   given IntDecoder: Decoder[Int] = new BasicDecoder[Int] {
@@ -272,6 +319,14 @@ trait PrimitiveDecoders {
       case int: Int     => int
       case other        => throw new UnsupportedOperationException(s"Cannot convert $other to type INT")
     }
+
+    // DATE and TIME columns are ints as well (epoch days, millis of day), used by the LocalDate decoder
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Int = logicalType.getTypeRoot match
+      case INTEGER | DATE | TIME_WITHOUT_TIME_ZONE =>
+        row => if row.isNullAt(index) then Columns.nullColumn("INT") else row.getInt(index)
+      case SMALLINT => row => if row.isNullAt(index) then Columns.nullColumn("INT") else row.getShort(index).toInt
+      case TINYINT  => row => if row.isNullAt(index) then Columns.nullColumn("INT") else row.getByte(index).toInt
+      case _        => super.decodeField(logicalType, index)
   }
 
   given Decoder[Long] = new BasicDecoder[Long] {
@@ -282,20 +337,37 @@ trait PrimitiveDecoders {
       case long: Long   => long
       case other        => throw new UnsupportedOperationException(s"Cannot convert $other to type LONG")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Long = logicalType.getTypeRoot match
+      case BIGINT   => row => if row.isNullAt(index) then Columns.nullColumn("LONG") else row.getLong(index)
+      case INTEGER  => row => if row.isNullAt(index) then Columns.nullColumn("LONG") else row.getInt(index).toLong
+      case SMALLINT => row => if row.isNullAt(index) then Columns.nullColumn("LONG") else row.getShort(index).toLong
+      case TINYINT  => row => if row.isNullAt(index) then Columns.nullColumn("LONG") else row.getByte(index).toLong
+      case _        => super.decodeField(logicalType, index)
   }
 
   given Decoder[Double] = new BasicDecoder[Double] {
     override def decode(value: Any): Double = value match {
-      case d: Double           => d
-      case d: java.lang.Double => d
+      case d: Double => d
+      case f: Float  => f.toDouble
+      case other     => throw new UnsupportedOperationException(s"Cannot convert $other to type DOUBLE")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Double = logicalType.getTypeRoot match
+      case DOUBLE => row => if row.isNullAt(index) then Columns.nullColumn("DOUBLE") else row.getDouble(index)
+      case FLOAT  => row => if row.isNullAt(index) then Columns.nullColumn("DOUBLE") else row.getFloat(index).toDouble
+      case _      => super.decodeField(logicalType, index)
   }
 
   given Decoder[Float] = new BasicDecoder[Float] {
     override def decode(value: Any): Float = value match {
-      case f: Float           => f
-      case f: java.lang.Float => f
+      case f: Float => f
+      case other    => throw new UnsupportedOperationException(s"Cannot convert $other to type FLOAT")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Float = logicalType.getTypeRoot match
+      case FLOAT => row => if row.isNullAt(index) then Columns.nullColumn("FLOAT") else row.getFloat(index)
+      case _     => super.decodeField(logicalType, index)
   }
 
   given Decoder[Boolean] = new BasicDecoder[Boolean] {
@@ -303,6 +375,10 @@ trait PrimitiveDecoders {
       case boolean: Boolean => boolean
       case other            => throw new UnsupportedOperationException(s"Cannot convert $other to type BOOLEAN")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Boolean = logicalType.getTypeRoot match
+      case BOOLEAN => row => if row.isNullAt(index) then Columns.nullColumn("BOOLEAN") else row.getBoolean(index)
+      case _       => super.decodeField(logicalType, index)
   }
 }
 
@@ -328,6 +404,11 @@ trait StringDecoders:
   * nevertheless usable.
   */
 object StringDecoder extends Decoder[String]:
+  override def decodeField(logicalType: LogicalType, index: Int): RowData => String = logicalType.getTypeRoot match
+    case CHAR | VARCHAR =>
+      row => if row.isNullAt(index) then Columns.nullColumn("String") else row.getString(index).toString
+    case _ => super.decodeField(logicalType, index)
+
   override def decode(logicalType: LogicalType): Any => String = {
     case stringData: StringData => stringData.toString
     case string: String         => string
@@ -337,6 +418,9 @@ object StringDecoder extends Decoder[String]:
   }
 
 object CharSequenceDecoder extends Decoder[CharSequence]:
+  override def decodeField(logicalType: LogicalType, index: Int): RowData => CharSequence =
+    StringDecoder.decodeField(logicalType, index)
+
   override def decode(logicalType: LogicalType): Any => CharSequence = {
     case stringData: StringData => stringData.toString
     case string: String         => string
@@ -361,6 +445,13 @@ class OptionDecoder[T](decoder: Decoder[T]) extends Decoder[Option[T]] {
 
     val decode = decoder.decode(logicalType)
     { value => if value == null then None else Some(decode(value)) }
+  }
+
+  override def decodeField(logicalType: LogicalType, index: Int): RowData => Option[T] = {
+    require(logicalType.isNullable, "Options can only be decoded when type is nullable")
+
+    val decodeT = decoder.decodeField(logicalType, index)
+    { row => if row.isNullAt(index) then None else Some(decodeT(row)) }
   }
 }
 
@@ -459,6 +550,15 @@ class MapDecoder[K, V](decoderK: Decoder[K], decoderV: Decoder[V]) extends Decod
 
 trait BigDecimalDecoders:
   given Decoder[BigDecimal] = new Decoder[BigDecimal]:
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => BigDecimal = logicalType match
+      case decimalType: DecimalType =>
+        val precision = decimalType.getPrecision
+        val scale     = decimalType.getScale
+        row =>
+          if row.isNullAt(index) then Columns.nullColumn("BigDecimal")
+          else BigDecimal(row.getDecimal(index, precision, scale).toBigDecimal)
+      case _ => super.decodeField(logicalType, index)
+
     override def decode(logicalType: LogicalType): Any => BigDecimal = {
       logicalType.getTypeRoot match {
         case DECIMAL => DecimalDataDecoder.decode(logicalType)
@@ -529,6 +629,13 @@ trait TemporalDecoders:
       case i: Int  => LocalTime.ofNanoOfDay(i.toLong * 1_000_000)
       case l: Long => LocalTime.ofNanoOfDay(l * 1_000_000)
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => LocalTime = logicalType.getTypeRoot match
+      case TIME_WITHOUT_TIME_ZONE | INTEGER =>
+        row =>
+          if row.isNullAt(index) then Columns.nullColumn("LocalTime")
+          else LocalTime.ofNanoOfDay(row.getInt(index).toLong * 1_000_000)
+      case _ => super.decodeField(logicalType, index)
   }
   given LocalDateDecoder: Decoder[LocalDate] = Decoder.IntDecoder.map[LocalDate](i => LocalDate.ofEpochDay(i.toLong))
 
@@ -542,6 +649,16 @@ trait TemporalDecoders:
       case i: Int                       => Instant.ofEpochMilli(i.toLong)
       case other => throw new IllegalArgumentException(s"Unsupported type for Instant decoding: ${other.getClass}")
     }
+
+    override def decodeField(logicalType: LogicalType, index: Int): RowData => Instant = logicalType match
+      case t: TimestampType           => timestamp(index, t.getPrecision)
+      case t: LocalZonedTimestampType => timestamp(index, t.getPrecision)
+      case t if t.getTypeRoot == BIGINT =>
+        row => if row.isNullAt(index) then Columns.nullColumn("Instant") else Instant.ofEpochMilli(row.getLong(index))
+      case _ => super.decodeField(logicalType, index)
+
+    private def timestamp(index: Int, precision: Int): RowData => Instant =
+      row => if row.isNullAt(index) then Columns.nullColumn("Instant") else row.getTimestamp(index, precision).toInstant
   }
 
 
