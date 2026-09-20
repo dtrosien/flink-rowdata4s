@@ -198,15 +198,15 @@ class RowEncoder[T](ctx: magnolia1.CaseClass[Encoder, T]) extends Encoder[T] {
   }
 
   private def encodeT(encoders: Array[FieldEncoder[T]], t: T): GenericRowData = {
-    // hot code path. Sacrificing functional programming to the gods of performance.
+    // fields are written directly into the row, GenericRowData.of would copy them from a varargs array
     val length = encoders.length
-    val values = new Array[Any](length)
+    val row    = new GenericRowData(length)
     var i      = 0
     while i < length do {
-      values(i) = encoders(i).encode(t)
+      row.setField(i, encoders(i).encode(t).asInstanceOf[AnyRef])
       i += 1
     }
-    GenericRowData.of(values*)
+    row
   }
 }
 
