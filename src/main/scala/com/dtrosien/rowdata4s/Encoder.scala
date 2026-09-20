@@ -399,7 +399,7 @@ class MapEncoder[K, V](encoderK: Encoder[K], encoderV: Encoder[V]) extends Encod
   override def encode(logicalType: LogicalType): Map[K, V] => Any = {
     val (encodeK, encodeV) = logicalType.getTypeRoot match
       case MULTISET =>
-        (encoderK.encode(IntType()), encoderV.encode(logicalType.asInstanceOf[MultisetType].getElementType))
+        (encoderK.encode(logicalType.asInstanceOf[MultisetType].getElementType), encoderV.encode(IntType(false)))
       case MAP =>
         (
           encoderK.encode(logicalType.asInstanceOf[MapType].getKeyType),

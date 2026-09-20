@@ -497,7 +497,8 @@ class EncoderTest extends UnitSpec:
   }
 
   it should "convert Map with MULTISET type" in {
-    case class WithMultiset(counts: Map[Int, String])
+    // MULTISET<STRING> is a map from element to count
+    case class WithMultiset(counts: Map[String, Int])
 
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("counts", MULTISET(STRING().notNull).notNull)
@@ -505,10 +506,18 @@ class EncoderTest extends UnitSpec:
     val logicalType                        = customType.getLogicalType
     val toRowData: ToRowData[WithMultiset] = ToRowData.apply[WithMultiset](logicalType)
 
-    val rowData = toRowData.to(WithMultiset(Map(1 -> "a")))
+    val rowData = toRowData.to(WithMultiset(Map("a" -> 2)))
 
-    rowData.getMap(0).keyArray().getInt(0) shouldBe 1
-    rowData.getMap(0).valueArray().getString(0).toString shouldBe "a"
+    rowData.getMap(0).keyArray().getString(0).toString shouldBe "a"
+    rowData.getMap(0).valueArray().getInt(0) shouldBe 2
+
+    // flink's own serializer for MULTISET expects exactly this layout
+    val serializer = new RowDataSerializer(logicalType.asInstanceOf[RowType])
+    val out        = new DataOutputSerializer(64)
+    serializer.serialize(rowData, out)
+    val deserialized: RowData = serializer.deserialize(new DataInputDeserializer(out.getCopyOfBuffer))
+
+    FromRowData.apply[WithMultiset](logicalType).from(deserialized) shouldBe WithMultiset(Map("a" -> 2))
   }
 
   it should "support Encoder.identity" in {

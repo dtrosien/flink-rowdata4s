@@ -755,10 +755,11 @@ class DecoderTest extends UnitSpec:
     val customType: DataType = DataTypes.ROW(
       DataTypes.FIELD("counts", DataTypes.MULTISET(STRING().notNull).notNull)
     )
-    case class WithMultiset(counts: Map[Int, String])
+    // MULTISET<STRING> is a map from element to count
+    case class WithMultiset(counts: Map[String, Int])
 
     val keyRow = GenericMapData(
-      Map(Int.box(1) -> StringData.fromString("a")).asJava
+      Map(StringData.fromString("a") -> Int.box(2)).asJava
     )
 
     val rowData: RowData = {
@@ -770,7 +771,7 @@ class DecoderTest extends UnitSpec:
     val fromRowData = FromRowData.apply[WithMultiset](customType.getLogicalType)
     val result      = fromRowData.from(rowData)
 
-    result.counts shouldBe Map(1 -> "a")
+    result.counts shouldBe Map("a" -> 2)
   }
 
   it should "decode Map from java.util.Map input" in {

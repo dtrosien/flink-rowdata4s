@@ -443,9 +443,11 @@ trait CollectionDecoders:
 class MapDecoder[K, V](decoderK: Decoder[K], decoderV: Decoder[V]) extends Decoder[Map[K, V]]:
   override def decode(logicalType: LogicalType): Any => Map[K, V] = {
     val (keyType, valueType, decodeK, decodeV) = logicalType.getTypeRoot match
+      // Flink stores MULTISET<T> as a map from element to count (INT), i.e. a Map[T, Int]
       case MULTISET =>
-        val valueType = logicalType.asInstanceOf[MultisetType].getElementType
-        (IntType(), valueType, decoderK.decode(IntType()), decoderV.decode(valueType))
+        val keyType   = logicalType.asInstanceOf[MultisetType].getElementType
+        val valueType = IntType(false)
+        (keyType, valueType, decoderK.decode(keyType), decoderV.decode(valueType))
       case MAP =>
         val keyType   = logicalType.asInstanceOf[MapType].getKeyType
         val valueType = logicalType.asInstanceOf[MapType].getValueType
