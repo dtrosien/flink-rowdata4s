@@ -350,17 +350,6 @@ object CharSequenceDecoder extends Decoder[CharSequence]:
       throw new UnsupportedOperationException(s"Unsupported type $other ${other.getClass} for StringDecoder")
   }
 
-object StrictStringDecoder extends Decoder[String]:
-  override def decode(logicalType: LogicalType): Any => String = logicalType.getTypeRoot match {
-    case VARCHAR | CHAR => StringDataDecoder.decode(logicalType)
-    case _              => throw new UnsupportedOperationException(s"Unsupported type for string schema: $logicalType")
-  }
-
-object StringDataDecoder extends Decoder[String]:
-  override def decode(logicalType: LogicalType): Any => String = { case stringData: StringData =>
-    stringData.toString
-  }
-
 // ==============================================
 // Option   =====================================
 // ==============================================
