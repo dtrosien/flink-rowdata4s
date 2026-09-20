@@ -28,7 +28,7 @@ object FromRowData {
   def apply[T <: Product](
       logicalType: LogicalType
   )(using decoder: Decoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): FromRowData[T] = {
-    // resolve the schema once, not on every record
+    // cache resolved schema
     val decode: Any => T = decoder.decode(logicalType)
     new FromRowData[T] {
       override def from(rowData: RowData): T = decode(rowData)

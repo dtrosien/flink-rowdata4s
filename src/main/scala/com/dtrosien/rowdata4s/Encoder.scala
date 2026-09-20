@@ -27,7 +27,7 @@ object ToRowData {
   def apply[T <: Product](
       logicalType: LogicalType
   )(using encoder: Encoder[T], notEnum: NotGiven[T <:< scala.reflect.Enum]): ToRowData[T] = new ToRowData[T] {
-    // resolve the schema once, not on every record
+    // cache resolved schema
     private val encode: T => Any = encoder.encode(logicalType)
 
     def to(t: T): RowData = encode(t) match {
